@@ -117,8 +117,6 @@ typedef char CODE3264_check[sizeof(void*) == CODE3264(4, 8) ? 1 : -1];
 
 #include <sys/mman.h>
 #include <unistd.h>
-#include <stdlib.h> //for posix_memalign
-#include <malloc.h> //for malloc_usable_size
 
 #define VMALLOC(size) (void*)(((uintptr_t)mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE, -1, 0)+1)&~1)//with the conversion of MAP_FAILED to 0
 #define VMFREE(p, size) munmap(p, size)
@@ -129,6 +127,102 @@ static size_t page_size()
 	static size_t pagesize = 0;
 	if (!pagesize) pagesize = sysconf(_SC_PAGE_SIZE);//assuming that writing of size_t value is atomic, so this can be done safely in different simultaneously running threads
 	return pagesize;
+}
+
+typedef struct PTrieNode            // Compressed radix tree (patricia trie) for storing sizes of system allocations
+{                                   // This implementation have some specific properties:
+    uintptr_t keys[2];              // 1. There are no separate leaf nodes (with both null children), as leaf's value is stored directly in place of corresponding child node pointer. Least significant bit of that pointer used to determine its meaning (i.e., is it a value, or child node pointer).
+    struct PTrieNode *childNodes[2];// 2. Inserting a new element (key/value) into this tree require to create always an exactly one new node (and similarly for remove key/node operation).
+} PTrieNode;                        // 3. Tree always contains just one node with null child (i.e. all but one nodes in any possible tree are always have two children).
+#define PTRIE_NULL_NODE (PTrieNode*)(uintptr_t)1
+static PTrieNode *ptrieRoot = PTRIE_NULL_NODE, *ptrieFreeNodesList = NULL, *ptrieNewAllocatedPage = NULL;
+static volatile int ptrieLock = 0;
+
+static uintptr_t ptrie_lookup(uintptr_t key)
+{
+	PTrieNode *node = ptrieRoot;
+	uintptr_t *lastKey = NULL;
+	while (!((uintptr_t)node & 1))
+	{
+		int branch = (key >> (node->keys[0] & 0xFF)) & 1;
+		lastKey = &node->keys[branch];
+		node = node->childNodes[branch];
+	}
+	assert(lastKey && (*lastKey & ~0xFF) == key);
+	return (uintptr_t)node & ~1;
+}
+
+static void ptrie_insert(uintptr_t key, uintptr_t value, PTrieNode *newNode/* = (PTrieNode*)malloc(sizeof(PTrieNode))*/)
+{
+	PTrieNode **node = &ptrieRoot, *n;
+	uintptr_t *prevKey = NULL, x, pkey;
+	unsigned int index, b;
+	assert(!((value & 1) | (key & 0xFF)));//check constraints for key/value
+	for (;;)
+	{
+		n = *node;
+		if (!((uintptr_t)n & 1))//not a leaf
+		{
+			int prefixEnd = n->keys[0] & 0xFF;
+			x = key ^ n->keys[0];// & ~0xFF;
+			if (!(x & (~(uintptr_t)1 << prefixEnd))) {//prefix matches, so go on
+				int branch = (key >> prefixEnd) & 1;
+				node = &n->childNodes[branch];
+				prevKey = &n->keys[branch];
+			} else {//insert a new node before current
+				pkey = n->keys[0] & ~0xFF;
+				break;
+			}
+		} else {//leaf
+			if (*node == PTRIE_NULL_NODE) {
+				*node = newNode;
+				newNode->keys[0] = key;//left prefixEnd = 0, so all following insertions will be before this node
+				newNode->childNodes[0] = (PTrieNode*)(value | 1);
+				newNode->childNodes[1] = PTRIE_NULL_NODE;
+				return;
+			} else {
+				pkey = *prevKey & ~0xFF;
+				x = key ^ pkey;
+				assert(x/*key != pkey*/ && "key already inserted");
+				break;
+			}
+		}
+	}
+	BSR(index, x);
+	b = (key >> index) & 1;
+	newNode->keys[b] = key;
+	newNode->keys[b^1] = pkey;
+	newNode->keys[0] |= index;
+	newNode->childNodes[b] = (PTrieNode*)(value | 1);
+	newNode->childNodes[b^1] = n;
+	*node = newNode;
+}
+
+static uintptr_t ptrie_remove(uintptr_t key)
+{
+	PTrieNode **node = &ptrieRoot;
+	uintptr_t *pkey = NULL;
+	assert(ptrieRoot != PTRIE_NULL_NODE && "trie is empty!");
+	for (;;)
+	{
+		PTrieNode *n = *node;
+		int branch = (key >> (n->keys[0] & 0xFF)) & 1;
+		PTrieNode *cn = n->childNodes[branch];//current child node
+		if ((uintptr_t)cn & 1)//leaf
+		{
+			PTrieNode *other = n->childNodes[branch^1];
+			assert((n->keys[branch] & ~0xFF) == key);
+			assert(cn != PTRIE_NULL_NODE && "node's key is probably broken");
+		//	if (other == PTRIE_NULL_NODE) *node = PTRIE_NULL_NODE; else//special handling for null child nodes is not necessary
+			if (((uintptr_t)other & 1) && other != PTRIE_NULL_NODE)//if other node is not a pointer
+				*pkey = (n->keys[branch^1] & ~0xFF) | ((*pkey) & 0xFF);
+			*node = other;
+			*(PTrieNode**)n = ptrieFreeNodesList; ptrieFreeNodesList = n;//free(n);
+			return (uintptr_t)cn & ~1;
+		}
+		pkey = &n->keys[branch];
+		node = &n->childNodes[branch];
+	}
 }
 #endif
 
@@ -172,7 +266,10 @@ static NOINLINE void sys_free(void *p)
 #ifdef _WIN32
 	VirtualFree(p, 0, MEM_RELEASE);
 #else
-	free(p);//we can not use munmap here, because it requires to specify length, and for using it we should manually keep map<void*,blockSize>, or something like that
+	SPINLOCK_ACQUIRE(&ptrieLock);
+	size_t size = ptrie_remove((uintptr_t)p);
+	SPINLOCK_RELEASE(&ptrieLock);
+	munmap(p, size);
 #endif
 }
 
@@ -458,10 +555,31 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 	else//allocate block directly from the system
 	{
 		if (unlikely(size == 0)) return NULL;//doing this check here is better than on the top level
-#ifdef _WIN32
+
+		size = (size + CHUNK_SIZE-1) & ~(CHUNK_SIZE-1);
 		p = sys_aligned_alloc(CHUNK_SIZE, size);
-#else
-		if (posix_memalign(&p, CHUNK_SIZE, size)) p = NULL;
+#ifndef _WIN32
+		if (p) {
+			SPINLOCK_ACQUIRE(&ptrieLock);
+			PTrieNode *newNode;
+			if (ptrieFreeNodesList)
+				ptrieFreeNodesList = *(PTrieNode**)(newNode = ptrieFreeNodesList);
+			else if (ptrieNewAllocatedPage) {
+				newNode = ptrieNewAllocatedPage;
+				if (!((uintptr_t)++ptrieNewAllocatedPage & (page_size()-1)))
+					ptrieNewAllocatedPage = ((PTrieNode**)ptrieNewAllocatedPage)[-1];
+			} else {
+				SPINLOCK_RELEASE(&ptrieLock);
+				newNode = (PTrieNode*)VMALLOC(page_size());
+				if (unlikely(!newNode)) { CPPCODE(if (throw_) throw std::bad_alloc(); else) return NULL; }
+				assert(((char**)((char*)newNode + page_size()))[-1] == 0);
+				SPINLOCK_ACQUIRE(&ptrieLock);
+				((PTrieNode**)((char*)newNode + page_size()))[-1] = ptrieNewAllocatedPage;//in case if other thread also have just allocated a new page
+				ptrieNewAllocatedPage = newNode + 1;
+			}
+			ptrie_insert((uintptr_t)p, size, newNode);
+			SPINLOCK_RELEASE(&ptrieLock);
+		}
 #endif
 		CPPCODE(if (throw_) if (unlikely(!p)) throw std::bad_alloc();)
 		return p;
@@ -556,7 +674,10 @@ size_t ltalloc_usable_size(void *p)
 		VirtualQuery(p, &mi, sizeof(mi));
 		return mi.RegionSize;}
 #else
-		return malloc_usable_size(p);
+		SPINLOCK_ACQUIRE(&ptrieLock);
+		size_t size = ptrie_lookup((uintptr_t)p);
+		SPINLOCK_RELEASE(&ptrieLock);
+		return size;
 #endif
 	}
 }
