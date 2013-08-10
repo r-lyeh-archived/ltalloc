@@ -398,6 +398,8 @@ static unsigned int batch_size(unsigned int sizeClass)//calculates a number of b
 	return ((MAX_BATCH_SIZE-1) >> (sizeClass >> LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)) & (MAX_NUM_OF_BLOCKS_IN_BATCH-1);
 }
 
+CPPCODE(template <bool> static) void *ltalloc(size_t size);
+
 CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t size, ThreadCache *tc, unsigned int sizeClass)
 {
 	void *p;
@@ -554,7 +556,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 	}
 	else//allocate block directly from the system
 	{
-		if (unlikely(size == 0)) return NULL;//doing this check here is better than on the top level
+		if (unlikely(size == 0)) return ltalloc CPPCODE(<throw_>)(1);//return NULL;//doing this check here is better than on the top level
 
 		size = (size + CHUNK_SIZE-1) & ~(CHUNK_SIZE-1);
 		p = sys_aligned_alloc(CHUNK_SIZE, size);
