@@ -234,23 +234,31 @@ static void *sys_aligned_alloc(size_t alignment, size_t size)
 	{
 		VMFREE(p, size);
 #ifdef _WIN32
+		{static DWORD allocationGranularity = 0;
+		if (!allocationGranularity) {
+			SYSTEM_INFO si;
+			GetSystemInfo(&si);
+			allocationGranularity = si.dwAllocationGranularity;
+		}
 		if ((uintptr_t)p < 16*1024*1024)//fill "bubbles" (reserve unaligned regions) at the beginning of virtual address space, otherwise there will be always falling back to the slow method
 			VirtualAlloc(p, alignment - ((uintptr_t)p & (alignment-1)), MEM_RESERVE, PAGE_NOACCESS);
 		do
 		{
-			p = VirtualAlloc(NULL, size + alignment, MEM_RESERVE, PAGE_NOACCESS);
+			p = VirtualAlloc(NULL, size + alignment - allocationGranularity, MEM_RESERVE, PAGE_NOACCESS);
 			if (p == NULL) return NULL;
 			VirtualFree(p, 0, MEM_RELEASE);//unfortunately, WinAPI doesn't support release a part of allocated region, so release a whole region
 			p = VirtualAlloc((void*)(((uintptr_t)p + (alignment-1)) & ~(alignment-1)), size, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
-		} while (p == NULL);
+		} while (p == NULL);}
 #else
-		p = VMALLOC(size + alignment);
+		p = VMALLOC(size + alignment - page_size());
 		if (p/* != MAP_FAILED*/)
 		{
 			uintptr_t ap = ((uintptr_t)p + (alignment-1)) & ~(alignment-1);
 			uintptr_t diff = ap - (uintptr_t)p;
 			if (diff) VMFREE(p, diff);
-			if (alignment - diff) VMFREE((void*)(ap + size), alignment - diff);
+			diff = alignment - page_size() - diff;
+			assert((intptr_t)diff >= 0);
+			if (diff) VMFREE((void*)(ap + size), diff);
 			return (void*)ap;
 		}
 #endif
