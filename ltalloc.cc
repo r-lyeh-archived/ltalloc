@@ -43,7 +43,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define CACHE_LINE_SIZE 64
 #define MAX_NUM_OF_BLOCKS_IN_BATCH 256//maximum number of blocks to move between a thread cache and a central cache in one shot
 static const unsigned int MAX_BATCH_SIZE = 64*1024;//maximum total size of blocks to move between a thread cache and a central cache in one shot (corresponds to half size of thread cache of each size class)
-static const unsigned int MAX_BLOCK_SIZE = 32*1024;//requesting memory of any size greater than this value will lead to direct call of system virtual memory allocation routine
+static const unsigned int MAX_BLOCK_SIZE = CHUNK_SIZE;//requesting memory of any size greater than this value will lead to direct call of system virtual memory allocation routine
 
 //Platform-specific stuff
 
@@ -314,6 +314,8 @@ extern CPPCODE("C") const PIMAGE_TLS_CALLBACK p_thread_callback_ltalloc = on_tls
 
 //End of platform-specific stuff
 
+#define MAX_BLOCK_SIZE (MAX_BLOCK_SIZE < CHUNK_SIZE - (CHUNK_SIZE >> (1 + LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)) ? \
+                        MAX_BLOCK_SIZE : CHUNK_SIZE - (CHUNK_SIZE >> (1 + LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)))
 #define NUMBER_OF_SIZE_CLASSES ((sizeof(void*)*8 + 1) << LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)
 
 typedef struct FreeBlock
