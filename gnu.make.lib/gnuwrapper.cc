@@ -90,8 +90,7 @@ size_t malloc_usable_size(void *ptr)
 
 int malloc_trim(size_t pad)
 {
-	(void)pad;
-	ltalloc_squeeze();
+	ltalloc_squeeze(pad);
 	return 0;
 }
 

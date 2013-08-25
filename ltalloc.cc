@@ -361,6 +361,13 @@ typedef struct
 } ThreadCache;
 static thread_local ThreadCache threadCache[NUMBER_OF_SIZE_CLASSES];// = {{0}};
 
+static struct
+{
+	volatile int lock;
+	void *freeChunk;
+	size_t size;
+} pad = {0, NULL, 0};
+
 static CPPCODE(inline) unsigned int get_size_class(size_t size)
 {
 	unsigned int index;
@@ -489,14 +496,26 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 
 			//Allocate new chunk
 			SPINLOCK_RELEASE(&cc->lock);//release lock for a while
-			p = sys_aligned_alloc(CHUNK_SIZE, CHUNK_SIZE);
-			if (unlikely(!p)) { CPPCODE(if (throw_) throw std::bad_alloc(); else) return NULL; }
+
+			SPINLOCK_ACQUIRE(&pad.lock);
+			if (pad.freeChunk)
+			{
+				p = pad.freeChunk;
+				pad.freeChunk = *(void**)p;
+				pad.size -= CHUNK_SIZE;
+				SPINLOCK_RELEASE(&pad.lock);
+				((char**)((char*)p + CHUNK_SIZE))[-1] = 0;
+			} else {
+				SPINLOCK_RELEASE(&pad.lock);
+				p = sys_aligned_alloc(CHUNK_SIZE, CHUNK_SIZE);
+				if (unlikely(!p)) { CPPCODE(if (throw_) throw std::bad_alloc(); else) return NULL; }
+			}
 
 #define CHUNK_IS_SMALL unlikely(sizeClass < get_size_class(2*sizeof(void*)))
 			{unsigned int numBlocksInChunk = (CHUNK_SIZE - (CHUNK_IS_SMALL ? sizeof(ChunkSm) : sizeof(Chunk)))/blockSize;
 #ifndef _WIN32
-			intptr_t sz = ((CHUNK_SIZE - numBlocksInChunk*blockSize) & ~(page_size()-1)) - page_size();
-			if (sz > 0) mprotect((char*)p + page_size(), sz, PROT_NONE);//munmap((char*)p + page_size(), sz);//to make possible unmapping, we need to be more careful when returning memory to the system, not simply VMFREE(firstFreeChunk, CHUNK_SIZE), so let there be just mprotect
+			//intptr_t sz = ((CHUNK_SIZE - numBlocksInChunk*blockSize) & ~(page_size()-1)) - page_size();
+			//if (sz > 0) mprotect((char*)p + page_size(), sz, PROT_NONE);//munmap((char*)p + page_size(), sz);//to make possible unmapping, we need to be more careful when returning memory to the system, not simply VMFREE(firstFreeChunk, CHUNK_SIZE), so let there be just mprotect
 #endif
 			assert(((char**)((char*)p + CHUNK_SIZE))[-1] == 0);//assume that allocated memory is always zero filled (on first access); it is better not to zero it explicitly because it will lead to allocation of physical page which may never needed otherwise
 			if (numBlocksInChunk < batchSize) {
@@ -724,7 +743,7 @@ static void release_thread_cache(void *p)
 	}
 }
 
-void ltalloc_squeeze(void)
+void ltalloc_squeeze(size_t padsz)
 {
 	unsigned int sizeClass = get_size_class(2*sizeof(void*));//skip small chunks because corresponding batches can not be efficiently detached from the central cache (if that becomes relevant, may be it worths to reimplement batches for small chunks from array to linked lists)
 	for (;sizeClass < NUMBER_OF_SIZE_CLASSES; sizeClass++)
@@ -854,13 +873,31 @@ continue_:;
 			if (bufferSize > sizeof(buffer)) VMFREE(inChunkFreeBlocks, bufferSize);//this better to do before 3. as kernel is likely optimized for release of just allocated range
 			GIVE_LISTS_BACK_TO_CC
 
+			if (padsz)
+			{
+				SPINLOCK_ACQUIRE(&pad.lock);
+				if (pad.size < padsz)
+				{
+					Chunk *first = firstFreeChunk, **c;
+					do//put off free chunks up to a specified pad size
+					{
+						c = (Chunk**)firstFreeChunk;
+						firstFreeChunk = *c;
+						pad.size += CHUNK_SIZE;
+					} while (pad.size < padsz && firstFreeChunk);
+					*c = (Chunk*)pad.freeChunk;
+					pad.freeChunk = first;
+				}
+				SPINLOCK_RELEASE(&pad.lock);
+			}
+
 			//3. Return memory to the system
-			do
+			while (firstFreeChunk)
 			{
 				Chunk *nextFreeChunk = *(Chunk**)firstFreeChunk;
 				VMFREE(firstFreeChunk, CHUNK_SIZE);
 				firstFreeChunk = nextFreeChunk;
-			} while (firstFreeChunk);
+			}
 		}
 		else//nothing to release - just return batches back to the central cache
 		{
