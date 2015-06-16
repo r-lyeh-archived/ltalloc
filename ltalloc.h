@@ -1,4 +1,14 @@
-void*  ltalloc(size_t);
+#include <stdlib.h>  /*a more portable size_t definition than stddef.h itself*/
+#ifdef __cplusplus
+extern "C" {
+#endif
+void*  ltmalloc(size_t);
 void   ltfree(void*);
-size_t ltalloc_usable_size(void*);
-void   ltalloc_squeeze(size_t pad);//return memory to the system (see http://code.google.com/p/ltalloc/wiki/Main#rmem for more details)
+void*  ltrealloc( void *, size_t );
+void*  ltcalloc( size_t, size_t );
+void*  ltmemalign( size_t, size_t );
+void   ltsqueeze(size_t pad); /*return memory to system (see README.md)*/
+size_t ltmsize(void*);
+#ifdef __cplusplus
+}
+#endif

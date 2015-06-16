@@ -36,10 +36,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   Project URL: http://code.google.com/p/ltalloc
 */
 
+#define LTALLOC_VERSION "2.0.0" /* (2015/06/16) - ltcalloc(), ltmsize(), ltrealloc(), ltmemalign(), LTALLOC_AUTO_GC_INTERVAL 
 #define LTALLOC_VERSION "1.0.0" /* (2015/06/16) - standard STL allocator provided [see ltalloc.hpp file](ltalloc.hpp)
-#define LTALLOC_VERSION "0.0.0" // (2013/xx/xx) - fork from public repository */
+#define LTALLOC_VERSION "0.0.0" /* (2013/xx/xx) - fork from public repository */
 
 //Customizable constants
+//#define LTALLOC_DISABLE_OPERATOR_NEW_OVERRIDE
+//#define LTALLOC_AUTO_GC_INTERVAL 3.0
 #ifndef LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO
 #define LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO 2//determines how accurately size classes are spaced (i.e. when = 0, allocation requests are rounded up to the nearest power of two (2^n), when = 1, rounded to 2^n, or (2^n)*1.5, when = 2, rounded to 2^n, (2^n)*1.25, (2^n)*1.5, or (2^n)*1.75, and so on); this parameter have direct influence on memory fragmentation - bigger values lead to reducing internal fragmentation (which can be approximately estimated as pow(0.5, VALUE)*100%), but at the same time increasing external fragmentation
 #endif
@@ -56,6 +59,14 @@ static const unsigned int MAX_BLOCK_SIZE = CHUNK_SIZE;//requesting memory of any
 #include <new>
 #else
 #define CPPCODE(code)
+#endif
+
+#ifdef LTALLOC_AUTO_GC_INTERVAL
+#include <time.h>
+#	if			LTALLOC_AUTO_GC_INTERVAL <= 0
+#		undef	LTALLOC_AUTO_GC_INTERVAL 
+#		define	LTALLOC_AUTO_GC_INTERVAL 3.00
+#	endif
 #endif
 
 #ifdef __GNUC__
@@ -419,7 +430,7 @@ static unsigned int batch_size(unsigned int sizeClass)//calculates a number of b
 	return ((MAX_BATCH_SIZE-1) >> (sizeClass >> LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)) & (MAX_NUM_OF_BLOCKS_IN_BATCH-1);
 }
 
-CPPCODE(template <bool> static) void *ltalloc(size_t size);
+CPPCODE(template <bool> static) void *ltmalloc(size_t size);
 
 CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t size, ThreadCache *tc, unsigned int sizeClass)
 {
@@ -589,7 +600,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 	}
 	else//allocate block directly from the system
 	{
-		if (unlikely(size == 0)) return ltalloc CPPCODE(<throw_>)(1);//return NULL;//doing this check here is better than on the top level
+		if (unlikely(size == 0)) return ltmalloc CPPCODE(<throw_>)(1);//return NULL;//doing this check here is better than on the top level
 
 		size = (size + CHUNK_SIZE-1) & ~(CHUNK_SIZE-1);
 		p = sys_aligned_alloc(CHUNK_SIZE, size);
@@ -621,7 +632,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 	}
 }
 
-CPPCODE(template <bool throw_> static) void *ltalloc(size_t size)
+CPPCODE(template <bool throw_> static) void *ltmalloc(size_t size)
 {
 	unsigned int sizeClass = get_size_class(size);
 	ThreadCache *tc = &threadCache[sizeClass];
@@ -635,7 +646,7 @@ CPPCODE(template <bool throw_> static) void *ltalloc(size_t size)
 	else
 		return fetch_from_central_cache CPPCODE(<throw_>)(size, tc, sizeClass);
 }
-CPPCODE(void *ltalloc(size_t size) {return ltalloc<false>(size);})//for possible external usage
+CPPCODE(void *ltmalloc(size_t size) {return ltmalloc<false>(size);})//for possible external usage
 
 static void add_batch_to_central_cache(CentralCache *cc, unsigned int sizeClass, FreeBlock *batch)
 {
@@ -695,7 +706,7 @@ void ltfree(void *p)
 		sys_free(p);
 }
 
-size_t ltalloc_usable_size(void *p)
+size_t ltmsize(void *p)
 {
 	if (likely((uintptr_t)p & (CHUNK_SIZE-1)))
 	{
@@ -747,7 +758,7 @@ static void release_thread_cache(void *p)
 	}
 }
 
-void ltalloc_squeeze(size_t padsz)
+void ltsqueeze(size_t padsz)
 {
 	unsigned int sizeClass = get_size_class(2*sizeof(void*));//skip small chunks because corresponding batches can not be efficiently detached from the central cache (if that becomes relevant, may be it worths to reimplement batches for small chunks from array to linked lists)
 	for (;sizeClass < NUMBER_OF_SIZE_CLASSES; sizeClass++)
@@ -912,13 +923,49 @@ continue_:;
 }
 
 #if defined(__cplusplus) && !defined(LTALLOC_DISABLE_OPERATOR_NEW_OVERRIDE)
-void *operator new  (size_t size) throw(std::bad_alloc)          {return ltalloc<true> (size);}
-void *operator new  (size_t size, const std::nothrow_t&) throw() {return ltalloc<false>(size);}
-void *operator new[](size_t size) throw(std::bad_alloc)          {return ltalloc<true> (size);}
-void *operator new[](size_t size, const std::nothrow_t&) throw() {return ltalloc<false>(size);}
+void *operator new  (size_t size) throw(std::bad_alloc)          {return ltmalloc<true> (size);}
+void *operator new  (size_t size, const std::nothrow_t&) throw() {return ltmalloc<false>(size);}
+void *operator new[](size_t size) throw(std::bad_alloc)          {return ltmalloc<true> (size);}
+void *operator new[](size_t size, const std::nothrow_t&) throw() {return ltmalloc<false>(size);}
 
 void operator delete  (void* p)                        throw() {ltfree(p);}
 void operator delete  (void* p, const std::nothrow_t&) throw() {ltfree(p);}
 void operator delete[](void* p)                        throw() {ltfree(p);}
 void operator delete[](void* p, const std::nothrow_t&) throw() {ltfree(p);}
 #endif
+
+/* @r-lyeh's { */
+#include <string.h>
+void *ltcalloc(size_t elems, size_t size) {
+	size *= elems;
+	return memset( ltmalloc( size ), 0, size );
+}
+void *ltmemalign( size_t align, size_t size ) {
+	return --align, ltmalloc( (size+align)&~align );
+}
+void *ltrealloc( void *ptr, size_t sz ) {
+	if( !ptr ) return ltmalloc( sz );
+	if( !sz  ) return ltfree( ptr ), (void *)0;
+	size_t osz = ltmsize( ptr );
+	if( sz <= osz ) {
+		return ptr;
+	}
+	void *nptr = memcpy( ltmalloc(sz), ptr, osz );
+	ltfree( ptr );
+
+#ifdef LTALLOC_AUTO_GC_INTERVAL
+	/* this is kind of compromise; the following timer is to guarantee
+	that memory gets wiped out at least every given seconds between consecutive 
+	ltrealloc() calls (I am assuming frequency usage for ltrealloc() is smaller
+	than ltmalloc() or ltfree() too) - @r-lyeh */
+			clock_t now = clock();
+	static	clock_t then = now;
+	if( ( double(now - then) / CLOCKS_PER_SEC ) > LTALLOC_AUTO_GC_INTERVAL ) {
+		ltsqueeze(0);
+	}
+	then = now;
+#endif
+
+	return nptr;
+}
+/* } */
