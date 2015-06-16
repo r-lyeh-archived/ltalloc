@@ -324,3 +324,9 @@ Also be aware, that GCC when using options -flto and -O3 with p.2 will not inlin
 Unfortunately, there is no simple way to override all malloc/free crt function calls under Windows, so far there is only one simple option to override almost all memory allocations in C++ programs via global operator new override - just add ltalloc.cc file into your project and you are done.
 
 ltalloc was successfully compiled with MSVC 2008/2010/2012, GCC 4.*, Intel Compiler 13, Clang 3.*, but it's source code is very simple, so it can be trivially ported to any other C or C++ compiler with native thread local variables support. (Warning: in some builds of MinGW there is a problem with emutls and order of execution of thread destructor (all thread local variables destructed before it), and termination of any thread will lead to application crash.)
+
+### Changelog
+- v1.0.0 (2015/06/16)
+  - standard STL allocator provided ([see ltalloc.hpp file](ltalloc.hpp))
+- v0.0.0 (2013/xx/xx) 
+  - Fork from public repository

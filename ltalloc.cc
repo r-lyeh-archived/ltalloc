@@ -1,5 +1,6 @@
 /*
 Copyright (c) 2013, Alexander Tretyak
+Copyright (c) 2015, r-lyeh
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -34,6 +35,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
   Project URL: http://code.google.com/p/ltalloc
 */
+
+#define LTALLOC_VERSION "1.0.0" /* (2015/06/16) - standard STL allocator provided [see ltalloc.hpp file](ltalloc.hpp)
+#define LTALLOC_VERSION "0.0.0" // (2013/xx/xx) - fork from public repository */
 
 //Customizable constants
 #ifndef LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO
