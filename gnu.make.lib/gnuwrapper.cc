@@ -2,6 +2,7 @@
 #error
 #endif
 
+#include "../ltalloc.h"
 #include "../ltalloc.cc"
 #include <malloc.h>
 #include <errno.h>
@@ -12,7 +13,7 @@ extern "C" {
 
 void *malloc(size_t size)
 {
-	return ltalloc(size);
+	return ltmalloc(size);
 }
 
 void free(void *ptr)
@@ -24,7 +25,7 @@ void *calloc(size_t n, size_t esize)
 {
 	size_t size = n * esize;
 	assert(esize == 0 || size / esize == n);//overflow check
-	void *result = ltalloc(size);
+	void *result = ltmalloc(size);
 	if (result && size <= MAX_BLOCK_SIZE)//memory obtained directly from the system are already zero filled
 		memset(result, 0, size);
 	return result;
@@ -38,22 +39,22 @@ void cfree(void *ptr)
 void *realloc(void *ptr, size_t size)
 {
 	if (ptr) {
-		size_t uSize = ltalloc_usable_size(ptr);
+		size_t uSize = ltmsize(ptr);
 		if (size <= uSize)//have nothing to do
 			return ptr;
-		void *newp = ltalloc(size);
+		void *newp = ltmalloc(size);
 		memcpy(newp, ptr, uSize);
 		ltfree(ptr);
 		return newp;
 	}
 	else
-		return ltalloc(size);
+		return ltmalloc(size);
 }
 
 void *memalign(size_t alignment, size_t size)
 {
 	assert(!(alignment & (alignment-1)) && "alignment must be a power of two");
-	return ltalloc((size + (alignment-1)) & ~(alignment-1));
+	return ltmalloc((size + (alignment-1)) & ~(alignment-1));
 }
 
 int posix_memalign(void **memptr, size_t alignment, size_t size)
@@ -70,7 +71,7 @@ int posix_memalign(void **memptr, size_t alignment, size_t size)
 void *aligned_alloc(size_t alignment, size_t size)
 {
 	assert(!(alignment & (alignment-1)) && !(size & (alignment-1)));
-	return ltalloc(size);
+	return ltmalloc(size);
 }
 
 void *valloc(size_t size)
@@ -85,12 +86,12 @@ void *pvalloc(size_t size)
 
 size_t malloc_usable_size(void *ptr)
 {
-	return ltalloc_usable_size(ptr);
+	return ltmsize(ptr);
 }
 
 int malloc_trim(size_t pad)
 {
-	ltalloc_squeeze(pad);
+	ltsqueeze(pad);
 	return 0;
 }
 
