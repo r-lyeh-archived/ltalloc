@@ -61,8 +61,9 @@ template <bool throw_> static void *ltalloc(size_t size)
 }
 ```
 
-   MSVC 2012 compiler 32-bit asm outpasm
+   MSVC 2012 compiler 32-bit asm output
 
+```asm
 mov         eax,dword ptr fs:[0000002Ch]
 mov         edx,dword ptr [eax]
 add         edx,128h ;296=sizeClass*sizeof(tc[0])
@@ -75,7 +76,7 @@ mov         dword ptr [edx],ecx
 ret
 ```
 
-```
+```asm
  L1:
  push        18h ; =24 (size class)
  mov         ecx,28h ; =40 (bytes size)
@@ -97,7 +98,7 @@ mov    QWORD PTR fs:[rdx+0x240],rcx
 ret
 ```
 
-```
+```asm
  L1:
  add    rdx,QWORD PTR fs:0x0
  mov    edi,0x28 ; =40 (bytes size)
@@ -132,7 +133,7 @@ NOINLINE void *create_list_of_arrays()
 }
 ```
 
-```
+```asm
  mov         eax,dword ptr fs:[0000002Ch]
  push        ebx
  push        esi
@@ -159,7 +160,7 @@ mov         edi,eax              ; p = n;
 jne         L2                   ; if (i<1000) goto L2
 ```
 
-```
+```asm
  pop         edi
  pop         esi
  pop         ebx
@@ -169,6 +170,7 @@ jne         L2                   ; if (i<1000) goto L2
 ```
 
    GCC
+
 ```asm
  ...
  L2:
@@ -185,7 +187,7 @@ mov    QWORD PTR [rax],r12          ; n->next = p;
 jne    L2                           ; if (i<1000) goto L2
 ```
 
-```
+```asm
  add    rsp,0x8
  pop    rbx
  pop    rbp
