@@ -35,7 +35,8 @@ After all, I thought what if specific pool can be chosen at compile-time when th
    When code of allocation function is small enough, compiler can inline it to eliminate need of call. And also, when size of object is known beforehand, it would be very good if size class (i.e. specific pool to satisfy that allocation request) can be chosen at compile-time. To make this possible, computation of the size class itself should rely only on built-in operators (no asm or external function calls) and must not access any dynamically calculated data. After all, application's source code should be compiled with link-time optimization turned on (/GL for MSVC, -flto for GCC/Clang, and -ipo for ICC) to make possible the inlining of operator new calls. As a sample output, here is a result of compilation of single statement "new std::array<int, 10>":
 
    Source Code
-   ```c++
+
+```c++
 NOINLINE void *test_function()
 {
     return new std::array<int, 10>;
@@ -60,8 +61,8 @@ template <bool throw_> static void *ltalloc(size_t size)
 }
 ```
 
-   MSVC 2012 compiler 32-bit asm output
-   ```asm
+   MSVC 2012 compiler 32-bit asm outpasm
+
 mov         eax,dword ptr fs:[0000002Ch]
 mov         edx,dword ptr [eax]
 add         edx,128h ;296=sizeClass*sizeof(tc[0])
@@ -73,7 +74,8 @@ inc         dword ptr [edx+8]
 mov         dword ptr [edx],ecx
 ret
 ```
-   ```
+
+```
  L1:
  push        18h ; =24 (size class)
  mov         ecx,28h ; =40 (bytes size)
@@ -83,7 +85,8 @@ ret
 ```
 
    GCC 4.8.1 64-bit asm output
-   ```asm
+
+```asm
 mov    rdx,0xffffffffffffe7a0
 mov    rax,QWORD PTR fs:[rdx+0x240]
 test   rax,rax
@@ -93,7 +96,8 @@ add    DWORD PTR fs:[rdx+0x250],0x1
 mov    QWORD PTR fs:[rdx+0x240],rcx
 ret
 ```
-   ```
+
+```
  L1:
  add    rdx,QWORD PTR fs:0x0
  mov    edi,0x28 ; =40 (bytes size)
@@ -107,7 +111,8 @@ ret
    Here is another example - function that do many allocations in a loop to create a singly-linked list of arrays:
 
    Source code
-   ```c++
+
+```c++
 NOINLINE void *create_list_of_arrays()
 {
     struct node
@@ -127,7 +132,7 @@ NOINLINE void *create_list_of_arrays()
 }
 ```
 
-   ```
+```
  mov         eax,dword ptr fs:[0000002Ch]
  push        ebx
  push        esi
@@ -136,10 +141,11 @@ NOINLINE void *create_list_of_arrays()
  xor         edi,edi
  add         esi,128h
  mov         ebx,3E8h    ; =1000
- ```
+```
 
    VS
-   ```asm
+
+```asm
  L2:
 mov         eax,dword ptr [esi]
 test        eax,eax
@@ -152,17 +158,18 @@ mov         dword ptr [eax],edi  ; n->next = p;
 mov         edi,eax              ; p = n;
 jne         L2                   ; if (i<1000) goto L2
 ```
-   ```
+
+```
  pop         edi
  pop         esi
  pop         ebx
  ret
  L1:
  ...
-   ```
+```
 
    GCC
-   ```asm
+```asm
  ...
  L2:
 mov    r12,rax                      ; p = n;
@@ -176,8 +183,9 @@ L3:
 sub    ebp,0x1                      ; i++
 mov    QWORD PTR [rax],r12          ; n->next = p;
 jne    L2                           ; if (i<1000) goto L2
-   ```
-   ```
+```
+
+```
  add    rsp,0x8
  pop    rbx
  pop    rbp
@@ -190,7 +198,7 @@ jne    L2                           ; if (i<1000) goto L2
  mov    edi,0x30
  call   <_Z24fetch_from_central_cache...>
  jmp    L3
-   ```
+```
 
    For this case, compiler has optimized a whole "new node;" statement inside the loop to a mere 6 asm instructions!
 
@@ -239,13 +247,13 @@ jne    L2                           ; if (i<1000) goto L2
    Briefly, that its ultimately minimalistic design and extremely polished implementation, especially minimization of conditional branches per a regular alloc call.
    Consider a typical implementation of memory allocation function:
 
-   ```c++
+```c++
 if (size == 0) return NULL (or size = 1)
 if (!initialized) initialize_allocator()
 if (size < some_threshold) (to test if size requested is small enough)
 if (freeList) {result = freeList, freeList = freeList->next}
 if (result == NULL) throw std::bad_alloc() (for an implementation of operator new)
-   ```
+```
 
    But in case of call to operator new overloaded via ltalloc there will be just one conditional branch (4th in the list above) in 99% cases, while all other checks are doing only when necessary in the remaining 1% rare cases.
 
@@ -259,9 +267,9 @@ if (result == NULL) throw std::bad_alloc() (for an implementation of operator ne
 
    But, if you really want this, you can run a separate thread which will just periodically call ltalloc_squeeze(0). Here is one-liner for C++11:
 
-   ```c++
+```c++
 std::thread([] {for (;;ltalloc_squeeze(0)) std::this_thread::sleep_for(std::chrono::seconds(3));}).detach();
-   ```
+```
 
 1. Why there are no any memory statistics provided by the allocator?
 
@@ -269,13 +277,13 @@ std::thread([] {for (;;ltalloc_squeeze(0)) std::this_thread::sleep_for(std::chro
 
    Anyway there will be some preprocessor macro define to turn it on, so you can take any suitable malloc implementation and optionally hook it up in place of ltalloc with preprocessor directives like this:
 
-   ```c++
+```c++
 #ifdef ENABLE_ADDITIONAL_MEMORY_INFO
 #include "some_malloc.cxx"
 #else
 #include "ltalloc.cc"
 #endif
-   ```
+```
 
 1. Why there is no separate function to allocate aligned memory (like aligned_alloc)?
 
@@ -313,6 +321,7 @@ hg clone https://code.google.com/p/ltalloc/
 cd ltalloc/gnu.make.lib
 make
 ```
+
 (then libltalloc.a and libltalloc.so files are created in the current directory)
 
 And with this options (2 or 3) all malloc/free routines (calloc, posix_memalign, etc.) are redirected to ltalloc.
@@ -326,6 +335,7 @@ Unfortunately, there is no simple way to override all malloc/free crt function c
 ltalloc was successfully compiled with MSVC 2008/2010/2012, GCC 4.*, Intel Compiler 13, Clang 3.*, but it's source code is very simple, so it can be trivially ported to any other C or C++ compiler with native thread local variables support. (Warning: in some builds of MinGW there is a problem with emutls and order of execution of thread destructor (all thread local variables destructed before it), and termination of any thread will lead to application crash.)
 
 ### Changelog
+
 - v2.0.0 (2015/06/16)
   - ltcalloc(), ltmsize(), ltrealloc(), ltmemalign(), LTALLOC_AUTO_GC_INTERVAL 
 - v1.0.0 (2015/06/16)
