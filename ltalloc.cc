@@ -923,9 +923,9 @@ continue_:;
 }
 
 #if defined(__cplusplus) && !defined(LTALLOC_DISABLE_OPERATOR_NEW_OVERRIDE)
-void *operator new  (size_t size) throw(std::bad_alloc)          {return ltmalloc<true> (size);}
+void *operator new  (size_t size) noexcept(false)                {return ltmalloc<true> (size);}
 void *operator new  (size_t size, const std::nothrow_t&) throw() {return ltmalloc<false>(size);}
-void *operator new[](size_t size) throw(std::bad_alloc)          {return ltmalloc<true> (size);}
+void *operator new[](size_t size) noexcept(false)                {return ltmalloc<true> (size);}
 void *operator new[](size_t size, const std::nothrow_t&) throw() {return ltmalloc<false>(size);}
 
 void operator delete  (void* p)                        throw() {ltfree(p);}
