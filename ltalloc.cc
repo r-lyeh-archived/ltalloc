@@ -923,9 +923,16 @@ continue_:;
 }
 
 #if defined(__cplusplus) && !defined(LTALLOC_DISABLE_OPERATOR_NEW_OVERRIDE)
-void *operator new  (size_t size) noexcept(false)                {return ltmalloc<true> (size);}
+// C++11 deprecates dynamic exception specifications
+#if __cplusplus >= 201103L 
+#define THROWS noexcept(false) 
+#else
+#define THROWS throw(std::bad_alloc)
+#endif
+
+void *operator new  (size_t size) THROWS                         {return ltmalloc<true> (size);}
 void *operator new  (size_t size, const std::nothrow_t&) throw() {return ltmalloc<false>(size);}
-void *operator new[](size_t size) noexcept(false)                {return ltmalloc<true> (size);}
+void *operator new[](size_t size) THROWS                         {return ltmalloc<true> (size);}
 void *operator new[](size_t size, const std::nothrow_t&) throw() {return ltmalloc<false>(size);}
 
 void operator delete  (void* p)                        throw() {ltfree(p);}
