@@ -36,9 +36,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   Project URL: http://code.google.com/p/ltalloc
 */
 
-#define LTALLOC_VERSION "2.0.0" /* (2015/06/16) - ltcalloc(), ltmsize(), ltrealloc(), ltmemalign(), LTALLOC_AUTO_GC_INTERVAL 
-#define LTALLOC_VERSION "1.0.0" /* (2015/06/16) - standard STL allocator provided [see ltalloc.hpp file](ltalloc.hpp)
-#define LTALLOC_VERSION "0.0.0" /* (2013/xx/xx) - fork from public repository */
+#define LTALLOC_VERSION "2.0.0" // (2015/06/16) - ltcalloc(), ltmsize(), ltrealloc(), ltmemalign(), LTALLOC_AUTO_GC_INTERVAL
+//#define LTALLOC_VERSION "1.0.0" (2015/06/16) - standard STL allocator provided [see ltalloc.hpp file](ltalloc.hpp)
+//#define LTALLOC_VERSION "0.0.0" (2013/xx/xx) - fork from public repository */
 
 //Customizable constants
 //#define LTALLOC_DISABLE_OPERATOR_NEW_OVERRIDE
