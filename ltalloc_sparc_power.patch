@@ -8,7 +8,7 @@
 +#define PAUSE __asm__ __volatile__("rd    %%ccr, %%g0\n\t" ::: "memory")
 +#elif defined(__ppc__)   || defined(_ARCH_PPC)  || \
 +      defined(_ARCH_PWR) || defined(_ARCH_PWR2) || defined(_POWER)
-+#define PAUSE __asm__ __volatile__ ("or 27,27,27")
++#define PAUSE __asm__ __volatile__("or 27,27,27")
 +#else
  #define PAUSE __asm__ __volatile__("pause" ::: "memory")
 +#endif
