@@ -1,0 +1,14 @@
+--- ltalloc.cc	Thu Nov 16 19:38:46 2017
++++ ltalloc.cc	Thu Nov 23 04:21:30 2017
+@@ -79,7 +79,11 @@
+ #define NOINLINE __attribute__((noinline))
+ #define CAS_LOCK(lock) __sync_lock_test_and_set(lock, 1)
+ #define SPINLOCK_RELEASE(lock) __sync_lock_release(lock)
++#ifdef __sparc__
++#define PAUSE asm volatile("rd    %%ccr, %%g0\n\t" ::: "memory")
++#else
+ #define PAUSE __asm__ __volatile__("pause" ::: "memory")
++#endif
+ #define BSR(r, v) r = CODE3264(__builtin_clz(v) ^ 31, __builtin_clzll(v) ^ 63)//x ^ 31 = 31 - x, but gcc does not optimize 31 - __builtin_clz(x) to bsr(x), but generates 31 - (bsr(x) ^ 31)
+ 
+ #elif _MSC_VER
