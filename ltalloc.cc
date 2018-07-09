@@ -79,7 +79,14 @@ static const unsigned int MAX_BLOCK_SIZE = CHUNK_SIZE;//requesting memory of any
 #define NOINLINE __attribute__((noinline))
 #define CAS_LOCK(lock) __sync_lock_test_and_set(lock, 1)
 #define SPINLOCK_RELEASE(lock) __sync_lock_release(lock)
+#ifdef __sparc__
+#define PAUSE __asm__ __volatile__("rd    %%ccr, %%g0\n\t" ::: "memory")
+#elif defined(__ppc__)   || defined(_ARCH_PPC)  || \
+      defined(_ARCH_PWR) || defined(_ARCH_PWR2) || defined(_POWER)
+#define PAUSE __asm__ __volatile__("or 27,27,27")
+#else
 #define PAUSE __asm__ __volatile__("pause" ::: "memory")
+#endif
 #define BSR(r, v) r = CODE3264(__builtin_clz(v) ^ 31, __builtin_clzll(v) ^ 63)//x ^ 31 = 31 - x, but gcc does not optimize 31 - __builtin_clz(x) to bsr(x), but generates 31 - (bsr(x) ^ 31)
 
 #elif _MSC_VER
@@ -135,6 +142,8 @@ typedef char CODE3264_check[sizeof(void*) == CODE3264(4, 8) ? 1 : -1];
 
 #define VMALLOC(size) (void*)(((uintptr_t)mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE, -1, 0)+1)&~1)//with the conversion of MAP_FAILED to 0
 #define VMFREE(p, size) munmap(p, size)
+
+#include "ltalloc.h"
 
 static size_t page_size()
 {
