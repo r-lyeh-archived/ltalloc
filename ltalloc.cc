@@ -36,9 +36,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   Project URL: http://code.google.com/p/ltalloc
 */
 
+#define LTALLOC_VERSION "2.0.1" /* (2018/07/09) - fix android (arm) build
 #define LTALLOC_VERSION "2.0.0" // (2015/06/16) - ltcalloc(), ltmsize(), ltrealloc(), ltmemalign(), LTALLOC_AUTO_GC_INTERVAL
-//#define LTALLOC_VERSION "1.0.0" (2015/06/16) - standard STL allocator provided [see ltalloc.hpp file](ltalloc.hpp)
-//#define LTALLOC_VERSION "0.0.0" (2013/xx/xx) - fork from public repository */
+#define LTALLOC_VERSION "1.0.0" // (2015/06/16) - standard STL allocator provided [see ltalloc.hpp file](ltalloc.hpp)
+#define LTALLOC_VERSION "0.0.0" // (2013/xx/xx) - fork from public repository */
 
 //Customizable constants
 //#define LTALLOC_DISABLE_OPERATOR_NEW_OVERRIDE
@@ -84,6 +85,9 @@ static const unsigned int MAX_BLOCK_SIZE = CHUNK_SIZE;//requesting memory of any
 #elif defined(__ppc__)   || defined(_ARCH_PPC)  || \
       defined(_ARCH_PWR) || defined(_ARCH_PWR2) || defined(_POWER)
 #define PAUSE __asm__ __volatile__("or 27,27,27")
+#efif defined(__ANDROID__)
+#include <sched.h> //for sched_yield
+#define PAUSE sched_yield()
 #else
 #define PAUSE __asm__ __volatile__("pause" ::: "memory")
 #endif
