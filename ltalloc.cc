@@ -80,13 +80,18 @@ static const unsigned int MAX_BLOCK_SIZE = CHUNK_SIZE;//requesting memory of any
 #define NOINLINE __attribute__((noinline))
 #define CAS_LOCK(lock) __sync_lock_test_and_set(lock, 1)
 #define SPINLOCK_RELEASE(lock) __sync_lock_release(lock)
-#define BSR(r, v) r = CODE3264(__builtin_clz(v) ^ 31, __builtin_clzll(v) ^ 63)//x ^ 31 = 31 - x, but gcc does not optimize 31 - __builtin_clz(x) to bsr(x), but generates 31 - (bsr(x) ^ 31)
-#ifdef __ANDROID__
+#ifdef __sparc__
+#define PAUSE __asm__ __volatile__("rd    %%ccr, %%g0\n\t" ::: "memory")
+#elif defined(__ppc__)   || defined(_ARCH_PPC)  || \
+      defined(_ARCH_PWR) || defined(_ARCH_PWR2) || defined(_POWER)
+#define PAUSE __asm__ __volatile__("or 27,27,27")
+#elif defined(__ANDROID__)
 #include <sched.h> //for sched_yield
 #define PAUSE sched_yield()
 #else
 #define PAUSE __asm__ __volatile__("pause" ::: "memory")
 #endif
+#define BSR(r, v) r = CODE3264(__builtin_clz(v) ^ 31, __builtin_clzll(v) ^ 63)//x ^ 31 = 31 - x, but gcc does not optimize 31 - __builtin_clz(x) to bsr(x), but generates 31 - (bsr(x) ^ 31)
 
 #elif _MSC_VER
 
@@ -141,6 +146,8 @@ typedef char CODE3264_check[sizeof(void*) == CODE3264(4, 8) ? 1 : -1];
 
 #define VMALLOC(size) (void*)(((uintptr_t)mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE, -1, 0)+1)&~1)//with the conversion of MAP_FAILED to 0
 #define VMFREE(p, size) munmap(p, size)
+
+#include "ltalloc.h"
 
 static size_t page_size()
 {
@@ -652,7 +659,7 @@ CPPCODE(template <bool throw_> static) void *ltmalloc(size_t size)
 	else
 		return fetch_from_central_cache CPPCODE(<throw_>)(size, tc, sizeClass);
 }
-CPPCODE(void *ltmalloc(size_t size) {return ltmalloc<false>(size);})//for possible external usage
+CPPCODE(extern "C" void *ltmalloc(size_t size) {return ltmalloc<false>(size);})//for possible external usage
 
 static void add_batch_to_central_cache(CentralCache *cc, unsigned int sizeClass, FreeBlock *batch)
 {
@@ -695,7 +702,7 @@ static NOINLINE void move_to_central_cache(ThreadCache *tc, unsigned int sizeCla
 	tc->freeList = NULL;
 }
 
-void ltfree(void *p)
+CPPCODE(extern "C") void ltfree(void *p)
 {
 	if (likely((uintptr_t)p & (CHUNK_SIZE-1)))
 	{
@@ -712,7 +719,7 @@ void ltfree(void *p)
 		sys_free(p);
 }
 
-size_t ltmsize(void *p)
+CPPCODE(extern "C") size_t ltmsize(void *p)
 {
 	if (likely((uintptr_t)p & (CHUNK_SIZE-1)))
 	{
@@ -764,7 +771,7 @@ static void release_thread_cache(void *p)
 	}
 }
 
-void ltsqueeze(size_t padsz)
+CPPCODE(extern "C") void ltsqueeze(size_t padsz)
 {
 	unsigned int sizeClass = get_size_class(2*sizeof(void*));//skip small chunks because corresponding batches can not be efficiently detached from the central cache (if that becomes relevant, may be it worths to reimplement batches for small chunks from array to linked lists)
 	for (;sizeClass < NUMBER_OF_SIZE_CLASSES; sizeClass++)
@@ -949,14 +956,14 @@ void operator delete[](void* p, const std::nothrow_t&) throw() {ltfree(p);}
 
 /* @r-lyeh's { */
 #include <string.h>
-void *ltcalloc(size_t elems, size_t size) {
+CPPCODE(extern "C") void *ltcalloc(size_t elems, size_t size) {
 	size *= elems;
 	return memset( ltmalloc( size ), 0, size );
 }
-void *ltmemalign( size_t align, size_t size ) {
+CPPCODE(extern "C") void *ltmemalign( size_t align, size_t size ) {
 	return --align, ltmalloc( (size+align)&~align );
 }
-void *ltrealloc( void *ptr, size_t sz ) {
+CPPCODE(extern "C") void *ltrealloc( void *ptr, size_t sz ) {
 	if( !ptr ) return ltmalloc( sz );
 	if( !sz  ) return ltfree( ptr ), (void *)0;
 	size_t osz = ltmsize( ptr );

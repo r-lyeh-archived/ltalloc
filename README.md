@@ -270,7 +270,7 @@ if (result == NULL) throw std::bad_alloc() (for an implementation of operator ne
    But, if you really want this, you can run a separate thread which will just periodically call ltalloc_squeeze(0). Here is one-liner for C++11:
 
 ```c++
-std::thread([] {for (;;ltalloc_squeeze(0)) std::this_thread::sleep_for(std::chrono::seconds(3));}).detach();
+std::thread([] {for (;;ltsqueeze(0)) std::this_thread::sleep_for(std::chrono::seconds(3));}).detach();
 ```
 
 1. Why there are no any memory statistics provided by the allocator?
