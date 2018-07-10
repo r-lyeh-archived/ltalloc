@@ -1,3 +1,5 @@
+#pragma once
+
 #include <stdlib.h>  /*a more portable size_t definition than stddef.h itself*/
 #ifdef __cplusplus
 extern "C" {
