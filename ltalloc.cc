@@ -85,7 +85,7 @@ static const unsigned int MAX_BLOCK_SIZE = CHUNK_SIZE;//requesting memory of any
 #elif defined(__ppc__)   || defined(_ARCH_PPC)  || \
       defined(_ARCH_PWR) || defined(_ARCH_PWR2) || defined(_POWER)
 #define PAUSE __asm__ __volatile__("or 27,27,27")
-#efif defined(__ANDROID__)
+#elif defined(__ANDROID__)
 #include <sched.h> //for sched_yield
 #define PAUSE sched_yield()
 #else
