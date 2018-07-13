@@ -4,7 +4,7 @@
 #include <thread>
 #include <chrono>
 
-const unsigned int ALLOC_COUNT = 10000000;
+const unsigned int ALLOC_COUNT = 1000000;
 
 void threadproc(int* error)
 {
@@ -31,13 +31,13 @@ void threadproc(int* error)
 
 TEST_CASE("Original test code from the wiki", "[ltalloc]")
 {
-	int nb_threads = std::thread::hardware_concurrency();
+	int nb_threads = std::min(std::thread::hardware_concurrency(), 12u);
 	INFO("nb_threads = " << nb_threads);
 	std::cout << "Using " << nb_threads << " threads\n";
 	std::cout.flush();
 
 	float maxmops = 0;
-	for (int n = 0; n < 8; ++n)
+	for (int n = 0; n < 4; ++n)
 	{
 		std::vector<int> thread_errors;
 		thread_errors.resize(nb_threads);
