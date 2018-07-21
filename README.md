@@ -1,3 +1,6 @@
+[![Build status](https://ci.appveyor.com/api/projects/status/0kbn9tchv9i820jq/branch/master?svg=true)](https://ci.appveyor.com/project/jlaumon/ltalloc/branch/master)
+[![Build Status](https://travis-ci.com/jlaumon/ltalloc.svg?branch=master)](https://travis-ci.com/jlaumon/ltalloc)
+
 # ltalloc
 - LightweighT Almost Lock-Less Oriented for C++ programs memory allocator
 - Automatically exported from code.google.com/p/ltalloc
