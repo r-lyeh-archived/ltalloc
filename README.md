@@ -1,4 +1,4 @@
-[![Build status](https://ci.appveyor.com/api/projects/status/0kbn9tchv9i820jq/branch/master?svg=true)](https://ci.appveyor.com/project/jlaumon/ltalloc/branch/master)
+[![Build status](https://ci.appveyor.com/api/projects/status/34qgcym4446x47ol?svg=true)](https://ci.appveyor.com/project/r-lyeh-archived/ltalloc)
 [![Build Status](https://travis-ci.org/r-lyeh-archived/ltalloc.svg?branch=master)](https://travis-ci.com/r-lyeh-archived/ltalloc)
 
 # ltalloc
