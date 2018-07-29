@@ -41,33 +41,69 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define LTALLOC_VERSION "1.0.0" // (2015/06/16) - standard STL allocator provided [see ltalloc.hpp file](ltalloc.hpp)
 #define LTALLOC_VERSION "0.0.0" // (2013/xx/xx) - fork from public repository */
 
-//Customizable constants
-//#define LTALLOC_DISABLE_OPERATOR_NEW_OVERRIDE
-//#define LTALLOC_AUTO_GC_INTERVAL 3.0
-#ifndef LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO
-#define LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO 2//determines how accurately size classes are spaced (i.e. when = 0, allocation requests are rounded up to the nearest power of two (2^n), when = 1, rounded to 2^n, or (2^n)*1.5, when = 2, rounded to 2^n, (2^n)*1.25, (2^n)*1.5, or (2^n)*1.75, and so on); this parameter have direct influence on memory fragmentation - bigger values lead to reducing internal fragmentation (which can be approximately estimated as pow(0.5, VALUE)*100%), but at the same time increasing external fragmentation
+// Optional user config file. Can be used to override the customizable constants and the platform specific macros.
+#ifdef LTALLOC_USER_CONFIG
+#include LTALLOC_USER_CONFIG
 #endif
-#define CHUNK_SIZE     (64*1024)//size of chunk (basic allocation unit for all allocations of size <= MAX_BLOCK_SIZE); must be a power of two (as well as all following parameters), also should not be less than allocation granularity on Windows (which is always 64K by design of NT kernel)
-#define CACHE_LINE_SIZE 64
-#define MAX_NUM_OF_BLOCKS_IN_BATCH 256//maximum number of blocks to move between a thread cache and a central cache in one shot
-static const unsigned int MAX_BATCH_SIZE = 64*1024;//maximum total size of blocks to move between a thread cache and a central cache in one shot (corresponds to half size of thread cache of each size class)
-static const unsigned int MAX_BLOCK_SIZE = CHUNK_SIZE;//requesting memory of any size greater than this value will lead to direct call of system virtual memory allocation routine
 
-//Platform-specific stuff
+// Customizable constants
+
+// Define to disable the override of the new operator (enabled by default if compiling this file in c++).
+//#define LTALLOC_DISABLE_OPERATOR_NEW_OVERRIDE
+
+// Define to enable an automatic call to ltsqueeze approximately every X seconds (3.0 by default). The call is made
+// during ltrealloc.
+#ifdef LTALLOC_AUTO_GC_INTERVAL
+#	if			LTALLOC_AUTO_GC_INTERVAL <= 0
+#		undef	LTALLOC_AUTO_GC_INTERVAL 
+#		define	LTALLOC_AUTO_GC_INTERVAL 3.00
+#	endif
+#endif
+
+// Determines how accurately size classes are spaced (i.e. when = 0, allocation requests are rounded up to the nearest
+// power of two (2^n), when = 1, rounded to 2^n, or (2^n)*1.5, when = 2, rounded to 2^n, (2^n)*1.25, (2^n)*1.5, or
+// (2^n)*1.75, and so on); this parameter have direct influence on memory fragmentation - bigger values lead to reducing
+// internal fragmentation (which can be approximately estimated as pow(0.5, VALUE)*100%), but at the same time
+// increasing external fragmentation.
+#ifndef LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO
+#define LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO 2
+#endif
+
+// Size of chunk (basic allocation unit for all allocations of size <= MAX_BLOCK_SIZE); must be a power of two (as well
+// as all following parameters), also should not be less than allocation granularity on Windows (which is always 64K by
+// design of NT kernel).
+#ifndef LTALLOC_CHUNK_SIZE
+#define LTALLOC_CHUNK_SIZE (64 * 1024)
+#endif
+
+// Maximum number of blocks to move between a thread cache and a central cache in one shot.
+#ifndef LTALLOC_MAX_NUM_OF_BLOCKS_IN_BATCH
+#define LTALLOC_MAX_NUM_OF_BLOCKS_IN_BATCH 256
+#endif
+
+// Maximum total size of blocks to move between a thread cache and a central cache in one shot (corresponds to half size
+// of thread cache of each size class)
+#ifndef LTALLOC_MAX_BATCH_SIZE
+#define LTALLOC_MAX_BATCH_SIZE (64 * 1024)
+#endif
+
+// Requesting memory of any size greater than this value will lead to direct call of system virtual memory allocation
+// routine).
+#ifndef LTALLOC_MAX_BLOCK_SIZE
+#define LTALLOC_MAX_BLOCK_SIZE LTALLOC_CHUNK_SIZE
+#endif
+
+// Platform-specific stuff
+
+#ifndef LTALLOC_CACHE_LINE_SIZE
+#define LTALLOC_CACHE_LINE_SIZE 64
+#endif
 
 #ifdef __cplusplus
 #define CPPCODE(code) code
 #include <new>
 #else
 #define CPPCODE(code)
-#endif
-
-#ifdef LTALLOC_AUTO_GC_INTERVAL
-#include <time.h>
-#	if			LTALLOC_AUTO_GC_INTERVAL <= 0
-#		undef	LTALLOC_AUTO_GC_INTERVAL 
-#		define	LTALLOC_AUTO_GC_INTERVAL 3.00
-#	endif
 #endif
 
 #ifdef __GNUC__
@@ -341,6 +377,12 @@ extern CPPCODE("C") const PIMAGE_TLS_CALLBACK p_thread_callback_ltalloc = on_tls
 #endif
 
 //End of platform-specific stuff
+
+#define CHUNK_SIZE                         LTALLOC_CHUNK_SIZE
+#define CACHE_LINE_SIZE                    LTALLOC_CACHE_LINE_SIZE
+#define MAX_NUM_OF_BLOCKS_IN_BATCH         LTALLOC_MAX_NUM_OF_BLOCKS_IN_BATCH
+static const unsigned int MAX_BATCH_SIZE = LTALLOC_MAX_BATCH_SIZE;
+static const unsigned int MAX_BLOCK_SIZE = LTALLOC_MAX_BLOCK_SIZE;
 
 #define MAX_BLOCK_SIZE (MAX_BLOCK_SIZE < CHUNK_SIZE - (CHUNK_SIZE >> (1 + LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)) ? \
                         MAX_BLOCK_SIZE : CHUNK_SIZE - (CHUNK_SIZE >> (1 + LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)))
@@ -956,6 +998,11 @@ void operator delete[](void* p, const std::nothrow_t&) throw() {ltfree(p);}
 
 /* @r-lyeh's { */
 #include <string.h>
+
+#ifdef LTALLOC_AUTO_GC_INTERVAL
+#include <time.h>
+#endif
+
 CPPCODE(extern "C") void *ltcalloc(size_t elems, size_t size) {
 	size *= elems;
 	return memset( ltmalloc( size ), 0, size );
