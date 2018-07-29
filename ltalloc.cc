@@ -97,6 +97,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //////////////////////////////////////////////////////////////////////////
 // Platform-specific stuff
 
+// Assert macro.
+#ifndef LTALLOC_ASSERT
+#include <assert.h>
+#define LTALLOC_ASSERT(cond) assert(cond)
+#endif
+
 // Size of a cache line.
 #ifndef LTALLOC_CACHE_LINE_SIZE
 #define LTALLOC_CACHE_LINE_SIZE 64
@@ -247,7 +253,6 @@ static void spinlock_acquire(volatile int *lock)
 #define CPPCODE(code)
 #endif
 
-#include <assert.h>
 #include <string.h> //for memset
 
 typedef char CODE3264_check[sizeof(void*) == CODE3264(4, 8) ? 1 : -1];
@@ -271,7 +276,7 @@ typedef char CODE3264_check[sizeof(void*) == CODE3264(4, 8) ? 1 : -1];
 
 static size_t page_size()
 {
-	assert((uintptr_t)MAP_FAILED+1 == 0);//have to use dynamic check somewhere, because some gcc versions (e.g. 4.4.5) won't compile typedef char MAP_FAILED_value_static_check[(uintptr_t)MAP_FAILED+1 == 0 ? 1 : -1];
+	LTALLOC_ASSERT((uintptr_t)MAP_FAILED+1 == 0);//have to use dynamic check somewhere, because some gcc versions (e.g. 4.4.5) won't compile typedef char MAP_FAILED_value_static_check[(uintptr_t)MAP_FAILED+1 == 0 ? 1 : -1];
 	static size_t pagesize = 0;
 	if (!pagesize) pagesize = sysconf(_SC_PAGE_SIZE);//assuming that writing of size_t value is atomic, so this can be done safely in different simultaneously running threads
 	return pagesize;
@@ -296,7 +301,7 @@ static uintptr_t ptrie_lookup(uintptr_t key)
 		lastKey = &node->keys[branch];
 		node = node->childNodes[branch];
 	}
-	assert(lastKey && (*lastKey & ~0xFF) == key);
+	LTALLOC_ASSERT(lastKey && (*lastKey & ~0xFF) == key);
 	return (uintptr_t)node & ~1;
 }
 
@@ -305,7 +310,7 @@ static void ptrie_insert(uintptr_t key, uintptr_t value, PTrieNode *newNode/* = 
 	PTrieNode **node = &ptrieRoot, *n;
 	uintptr_t *prevKey = NULL, x, pkey;
 	unsigned int index, b;
-	assert(!((value & 1) | (key & 0xFF)));//check constraints for key/value
+	LTALLOC_ASSERT(!((value & 1) | (key & 0xFF)));//check constraints for key/value
 	for (;;)
 	{
 		n = *node;
@@ -331,7 +336,7 @@ static void ptrie_insert(uintptr_t key, uintptr_t value, PTrieNode *newNode/* = 
 			} else {
 				pkey = *prevKey & ~0xFF;
 				x = key ^ pkey;
-				assert(x/*key != pkey*/ && "key already inserted");
+				LTALLOC_ASSERT(x/*key != pkey*/ && "key already inserted");
 				break;
 			}
 		}
@@ -350,7 +355,7 @@ static uintptr_t ptrie_remove(uintptr_t key)
 {
 	PTrieNode **node = &ptrieRoot;
 	uintptr_t *pkey = NULL;
-	assert(ptrieRoot != PTRIE_NULL_NODE && "trie is empty!");
+	LTALLOC_ASSERT(ptrieRoot != PTRIE_NULL_NODE && "trie is empty!");
 	for (;;)
 	{
 		PTrieNode *n = *node;
@@ -359,8 +364,8 @@ static uintptr_t ptrie_remove(uintptr_t key)
 		if ((uintptr_t)cn & 1)//leaf
 		{
 			PTrieNode *other = n->childNodes[branch^1];
-			assert((n->keys[branch] & ~0xFF) == key);
-			assert(cn != PTRIE_NULL_NODE && "node's key is probably broken");
+			LTALLOC_ASSERT((n->keys[branch] & ~0xFF) == key);
+			LTALLOC_ASSERT(cn != PTRIE_NULL_NODE && "node's key is probably broken");
 		//	if (other == PTRIE_NULL_NODE) *node = PTRIE_NULL_NODE; else//special handling for null child nodes is not necessary
 			if (((uintptr_t)other & 1) && other != PTRIE_NULL_NODE)//if other node is not a pointer
 				*pkey = (n->keys[branch^1] & ~0xFF) | ((*pkey) & 0xFF);
@@ -377,7 +382,7 @@ static uintptr_t ptrie_remove(uintptr_t key)
 static void *sys_aligned_alloc(size_t alignment, size_t size)
 {
 	void *p = VMALLOC(size);//optimistically try mapping precisely the right amount before falling back to the slow method
-	assert(!(alignment & (alignment-1)) && "alignment must be a power of two");
+	LTALLOC_ASSERT(!(alignment & (alignment-1)) && "alignment must be a power of two");
 	if ((uintptr_t)p & (alignment-1)/* && p != MAP_FAILED*/)
 	{
 		VMFREE(p, size);
@@ -405,7 +410,7 @@ static void *sys_aligned_alloc(size_t alignment, size_t size)
 			uintptr_t diff = ap - (uintptr_t)p;
 			if (diff) VMFREE(p, diff);
 			diff = alignment - page_size() - diff;
-			assert((intptr_t)diff >= 0);
+			LTALLOC_ASSERT((intptr_t)diff >= 0);
 			if (diff) VMFREE((void*)(ap + size), diff);
 			return (void*)ap;
 		}
@@ -579,14 +584,14 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 		FreeBlock *fb = tc->tempList;
 		if (fb)
 		{
-			assert(tc->counter == (int)batch_size(sizeClass)+1);
+			LTALLOC_ASSERT(tc->counter == (int)batch_size(sizeClass)+1);
 			tc->counter = 1;
 			tc->freeList = fb->next;
 			tc->tempList = NULL;
 			return fb;
 		}
 
-		assert(tc->counter == 0 || tc->counter == (int)batch_size(sizeClass)+1);
+		LTALLOC_ASSERT(tc->counter == 0 || tc->counter == (int)batch_size(sizeClass)+1);
 		tc->counter = 1;
 
 		{CentralCache *cc = &centralCache[sizeClass];
@@ -597,7 +602,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 
 			if (cc->freeList)
 			{
-				assert(cc->freeListSize);
+				LTALLOC_ASSERT(cc->freeListSize);
 				if (likely(cc->freeListSize <= batchSize + 1))
 				{
 					tc->counter = batchSize - cc->freeListSize + 1;
@@ -625,7 +630,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 			if (cc->freeBlocksInLastChunk)
 			{
 				char *firstFree = cc->lastChunk;
-				assert(cc->lastChunk && cc->freeBlocksInLastChunk == (CHUNK_SIZE - ((uintptr_t)cc->lastChunk & (CHUNK_SIZE-1)))/blockSize);
+				LTALLOC_ASSERT(cc->lastChunk && cc->freeBlocksInLastChunk == (CHUNK_SIZE - ((uintptr_t)cc->lastChunk & (CHUNK_SIZE-1)))/blockSize);
 				if (cc->freeBlocksInLastChunk < batchSize) {
 					tc->counter = batchSize - cc->freeBlocksInLastChunk + 1;
 					batchSize = cc->freeBlocksInLastChunk;
@@ -633,7 +638,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 				cc->freeBlocksInLastChunk -= batchSize;
 				cc->lastChunk += blockSize * batchSize;
 				if (cc->freeBlocksInLastChunk == 0) {
-					assert(((uintptr_t)cc->lastChunk & (CHUNK_SIZE-1)) == 0);
+					LTALLOC_ASSERT(((uintptr_t)cc->lastChunk & (CHUNK_SIZE-1)) == 0);
 					cc->lastChunk = ((char**)cc->lastChunk)[-1];
 					if (cc->lastChunk)
 						cc->freeBlocksInLastChunk = (CHUNK_SIZE - ((uintptr_t)cc->lastChunk & (CHUNK_SIZE-1)))/blockSize;
@@ -671,7 +676,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 			//intptr_t sz = ((CHUNK_SIZE - numBlocksInChunk*blockSize) & ~(page_size()-1)) - page_size();
 			//if (sz > 0) mprotect((char*)p + page_size(), sz, PROT_NONE);//munmap((char*)p + page_size(), sz);//to make possible unmapping, we need to be more careful when returning memory to the system, not simply VMFREE(firstFreeChunk, CHUNK_SIZE), so let there be just mprotect
 #endif
-			assert(((char**)((char*)p + CHUNK_SIZE))[-1] == 0);//assume that allocated memory is always zero filled (on first access); it is better not to zero it explicitly because it will lead to allocation of physical page which may never needed otherwise
+			LTALLOC_ASSERT(((char**)((char*)p + CHUNK_SIZE))[-1] == 0);//assume that allocated memory is always zero filled (on first access); it is better not to zero it explicitly because it will lead to allocation of physical page which may never needed otherwise
 			if (numBlocksInChunk < batchSize) {
 				tc->counter = batchSize - numBlocksInChunk + 1;
 				batchSize = numBlocksInChunk;
@@ -727,7 +732,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 				{
 					if (unlikely(cs->prev == NULL)) goto no_free_batch;
 					cs = cc->chunkWithFreeBatches = cs->prev;
-					assert(cs->numBatches == NUM_OF_BATCHES_IN_CHUNK_SM);
+					LTALLOC_ASSERT(cs->numBatches == NUM_OF_BATCHES_IN_CHUNK_SM);
 				}
 				fb = cs->batches[--cs->numBatches];
 			}
@@ -757,7 +762,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 				SPINLOCK_RELEASE(&ptrieLock);
 				newNode = (PTrieNode*)VMALLOC(page_size());
 				if (unlikely(!newNode)) { CPPCODE(if (throw_) throw std::bad_alloc(); else) return NULL; }
-				assert(((char**)((char*)newNode + page_size()))[-1] == 0);
+				LTALLOC_ASSERT(((char**)((char*)newNode + page_size()))[-1] == 0);
 				SPINLOCK_ACQUIRE(&ptrieLock);
 				((PTrieNode**)((char*)newNode + page_size()))[-1] = ptrieNewAllocatedPage;//in case if other thread also have just allocated a new page
 				ptrieNewAllocatedPage = newNode + 1;
@@ -800,7 +805,7 @@ static void add_batch_to_central_cache(CentralCache *cc, unsigned int sizeClass,
 		if (unlikely(cs->numBatches == NUM_OF_BATCHES_IN_CHUNK_SM))
 		{
 			cs = cc->chunkWithFreeBatches = cc->chunkWithFreeBatches->next;
-			assert(cs && cs->numBatches == 0);
+			LTALLOC_ASSERT(cs && cs->numBatches == 0);
 		}
 		cs->batches[cs->numBatches++] = batch;
 	}
@@ -889,7 +894,7 @@ static void release_thread_cache(void *p)
 			if (tc->freeList) {//append tc->freeList to cc->freeList
 				tail->next = cc->freeList;
 				cc->freeList = tc->freeList;
-				assert(freeListSize == batch_size(sizeClass)+1 - tc->counter);
+				LTALLOC_ASSERT(freeListSize == batch_size(sizeClass)+1 - tc->counter);
 				cc->freeListSize += freeListSize;
 			}
 			SPINLOCK_RELEASE(&cc->lock);
@@ -927,7 +932,7 @@ CPPCODE(extern "C") void ltsqueeze(size_t padsz)
 		unsigned int numBlocksInChunk = (CHUNK_SIZE - (/*CHUNK_IS_SMALL ? sizeof(ChunkSm) : */sizeof(Chunk)))/class_to_size(sizeClass);
 		FreeBlock **pbatch, *block, **pblock;
 		Chunk *firstFreeChunk = NULL;
-		assert(numBlocksInChunk < (1U<<(sizeof(short)*8)));//in case if CHUNK_SIZE is too big that total count of blocks in it doesn't fit at short type (...may be use static_assert instead?)
+		LTALLOC_ASSERT(numBlocksInChunk < (1U<<(sizeof(short)*8)));//in case if CHUNK_SIZE is too big that total count of blocks in it doesn't fit at short type (...may be use static_assert instead?)
 		if (inChunkFreeBlocks)//consider VMALLOC can fail
 		{
 			for (pbatch = &firstBatch; *pbatch; pbatch = &(*pbatch)->nextBatch)
@@ -936,7 +941,7 @@ CPPCODE(extern "C") void ltsqueeze(size_t padsz)
 					if (++inChunkFreeBlocks[((uintptr_t)block - minChunkAddr) / CHUNK_SIZE] == numBlocksInChunk)/*chunk is totally free*/\
 					{\
 						Chunk *chunk = (Chunk*)((uintptr_t)block & ~(CHUNK_SIZE-1));\
-						assert(chunk->sizeClass == sizeClass);/*just in case check before overwriting this info*/\
+						LTALLOC_ASSERT(chunk->sizeClass == sizeClass);/*just in case check before overwriting this info*/\
 						*(Chunk**)chunk = firstFreeChunk;/*put nextFreeChunk pointer right at the beginning of Chunk as there are always must be a space for one pointer before first memory block*/\
 						firstFreeChunk = chunk;\
 					}
