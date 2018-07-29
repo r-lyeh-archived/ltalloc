@@ -46,6 +46,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include LTALLOC_USER_CONFIG
 #endif
 
+//////////////////////////////////////////////////////////////////////////
 // Customizable constants
 
 // Define to disable the override of the new operator (enabled by default if compiling this file in c++).
@@ -93,79 +94,162 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define LTALLOC_MAX_BLOCK_SIZE LTALLOC_CHUNK_SIZE
 #endif
 
+//////////////////////////////////////////////////////////////////////////
 // Platform-specific stuff
 
+// Size of a cache line.
 #ifndef LTALLOC_CACHE_LINE_SIZE
 #define LTALLOC_CACHE_LINE_SIZE 64
 #endif
 
+// Defined to 1 when compiling in 64 bits mode (.ie pointers are 64 bits).
+#ifndef LTALLOC_64BITS
+#ifdef __GNUC__
+#	define __STDC_LIMIT_MACROS
+#	include <stdint.h>
+#	define LTALLOC_64BITS (UINTPTR_MAX == UINT64_MAX)
+#elif _MSC_VER
+#	if defined(_WIN64)
+#		define LTALLOC_64BITS 1
+#	else
+#		define LTALLOC_64BITS 0
+#	endif
+#else
+#	error LTALLOC_64BITS not defined.
+#endif
+#endif
+
+// Allows to declare an aligned variable or struct. Equivalent to c++11 alignas keyword.
+#ifndef LTALLOC_ALIGNAS
+#ifdef __GNUC__
+#	define LTALLOC_ALIGNAS(a) __attribute__((aligned(a)))
+#elif _MSC_VER
+#	define LTALLOC_ALIGNAS(a) __declspec(align(a))
+#else
+#	error LTALLOC_ALIGNAS not implemented.
+#endif
+#endif
+
+// Allows to declare a thread local variable. Equivalent to c++11 thread_local keyworkd.
+#ifndef LTALLOC_THREAD_LOCAL
+#ifdef __GNUC__
+#	define LTALLOC_THREAD_LOCAL __thread
+#elif _MSC_VER
+#	define LTALLOC_THREAD_LOCAL __declspec(thread)
+#else
+#	error LTALLOC_THREAD_LOCAL not implemented.
+#endif
+#endif
+
+// Tells the compiler not to inline a function.
+#ifndef LTALLOC_NOINLINE
+#ifdef __GNUC__
+#	define LTALLOC_NOINLINE  __attribute__((noinline))
+#elif _MSC_VER
+#	define LTALLOC_NOINLINE __declspec(noinline)
+#else
+#	define LTALLOC_NOINLINE
+#endif
+#endif
+
+// Hints to tell the compiler if a condition is likely or unlikely to be true.
+#if defined(LTALLOC_LIKELY) || defined(LTALLOC_UNLIKELY)
+#if !defined(LTALLOC_LIKELY) || !defined(LTALLOC_UNLIKELY) || !defined(LTALLOC_SPINLOCK_RELEASE) 
+#	error LTALLOC_LIKELY and LTALLOC_UNLIKELY should either both be provided, or both left undefined.
+#endif
+#else
+#if __GNUC__ || __INTEL_COMPILER
+#	define LTALLOC_LIKELY(x) __builtin_expect(!!(x), 1)
+#	define LTALLOC_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#	define LTALLOC_LIKELY(x) (x)
+#	define LTALLOC_UNLIKELY(x) (x)
+#endif
+#endif
+
+// LTALLOC_SPINLOCK_TYPE is the type of a spinlock. LTALLOC_SPINLOCK_ACQUIRE(lockptr) is used to lock it,
+// LTALLOC_SPINLOCK_RELEASE(lockptr) to unlock it.
+#if defined(LTALLOC_SPINLOCK_TYPE) || defined(LTALLOC_SPINLOCK_ACQUIRE) || defined(LTALLOC_SPINLOCK_RELEASE) 
+#if !defined(LTALLOC_SPINLOCK_TYPE) || !defined(LTALLOC_SPINLOCK_ACQUIRE) || !defined(LTALLOC_SPINLOCK_RELEASE) 
+#	error LTALLOC_SPINLOCK_TYPE, LTALLOC_SPINLOCK_ACQUIRE and LTALLOC_SPINLOCK_RELEASE must either all be provided, or all left undefined.
+#endif
+#else
+
+#ifdef __GNUC__
+#	define CAS_LOCK(lock) __sync_lock_test_and_set(lock, 1)
+#	define LTALLOC_SPINLOCK_RELEASE(lock) __sync_lock_release(lock)
+#	ifdef __sparc__
+#		define PAUSE __asm__ __volatile__("rd    %%ccr, %%g0\n\t" ::: "memory")
+#	elif defined(__ppc__)  || defined(_ARCH_PPC) || defined(_ARCH_PWR) || defined(_ARCH_PWR2) || defined(_POWER)
+#		define PAUSE __asm__ __volatile__("or 27,27,27")
+#	elif defined(__ANDROID__)
+#		include <sched.h> //for sched_yield
+#		define PAUSE sched_yield()
+#	else
+#		define PAUSE __asm__ __volatile__("pause" ::: "memory")
+#	endif
+#elif _MSC_VER
+#	include <intrin.h>
+#	define CAS_LOCK(lock) _InterlockedExchange((long*)lock, 1)
+#	define LTALLOC_SPINLOCK_RELEASE(lock) _InterlockedExchange((long*)lock, 0)
+#	define PAUSE _mm_pause()
+#else
+#	error LTALLOC_SPINLOCK_* not implemented.
+#endif
+
+static void spinlock_acquire(volatile int *lock)
+{
+	if (CAS_LOCK(lock))
+		while (*lock || CAS_LOCK(lock))
+			PAUSE;
+}
+
+#define LTALLOC_SPINLOCK_TYPE volatile int
+#define LTALLOC_SPINLOCK_ACQUIRE(lock) spinlock_acquire(lock)
+#endif
+
+// Searches in reverse order (from most significant bit to least) for the firt bit set in v and writes its index into r.
+#ifndef LTALLOC_BIT_SCAN_REVERSE
+#ifdef __GNUC__
+#	define LTALLOC_BIT_SCAN_REVERSE(r, v) r = CODE3264(__builtin_clz(v) ^ 31, __builtin_clzll(v) ^ 63)//x ^ 31 = 31 - x, but gcc does not optimize 31 - __builtin_clz(x) to bsr(x), but generates 31 - (bsr(x) ^ 31)
+#elif _MSC_VER
+#	include <intrin.h>
+#	define LTALLOC_BIT_SCAN_REVERSE(r, v) CODE3264(_BitScanReverse, _BitScanReverse64)((unsigned long*)&r, v)
+#else
+#	error LTALLOC_BIT_SCAN_REVERSE must be implemented for ltalloc to work.
+#endif
+#endif
+
+#if LTALLOC_64BITS
+#define CODE3264(c32, c64) c64
+#else
+#define CODE3264(c32, c64) c32
+#endif
+
+#ifdef _MSC_VER
+#define _ALLOW_KEYWORD_MACROS
+#endif
+
+// Let's minimize the change to the code below by keeping the old defined for now.
+#define alignas(a)             LTALLOC_ALIGNAS(a)
+#define thread_local           LTALLOC_THREAD_LOCAL
+#define NOINLINE               LTALLOC_NOINLINE
+#define likely(x)              LTALLOC_LIKELY(x)
+#define unlikely(x)            LTALLOC_UNLIKELY(x)
+#define BSR(r,v)               LTALLOC_BIT_SCAN_REVERSE(r, v)
+#define SPINLOCK_ACQUIRE(lock) LTALLOC_SPINLOCK_ACQUIRE(lock)
+#define SPINLOCK_RELEASE(lock) LTALLOC_SPINLOCK_RELEASE(lock)
+
 #ifdef __cplusplus
-#define CPPCODE(code) code
 #include <new>
+#define CPPCODE(code) code
 #else
 #define CPPCODE(code)
 #endif
 
-#ifdef __GNUC__
-
-#define __STDC_LIMIT_MACROS
-#include <stdint.h> //for SIZE_MAX
-#include <limits.h> //for UINT_MAX
-#define alignas(a) __attribute__((aligned(a)))
-#define thread_local __thread
-#define NOINLINE __attribute__((noinline))
-#define CAS_LOCK(lock) __sync_lock_test_and_set(lock, 1)
-#define SPINLOCK_RELEASE(lock) __sync_lock_release(lock)
-#ifdef __sparc__
-#define PAUSE __asm__ __volatile__("rd    %%ccr, %%g0\n\t" ::: "memory")
-#elif defined(__ppc__)   || defined(_ARCH_PPC)  || \
-      defined(_ARCH_PWR) || defined(_ARCH_PWR2) || defined(_POWER)
-#define PAUSE __asm__ __volatile__("or 27,27,27")
-#elif defined(__ANDROID__)
-#include <sched.h> //for sched_yield
-#define PAUSE sched_yield()
-#else
-#define PAUSE __asm__ __volatile__("pause" ::: "memory")
-#endif
-#define BSR(r, v) r = CODE3264(__builtin_clz(v) ^ 31, __builtin_clzll(v) ^ 63)//x ^ 31 = 31 - x, but gcc does not optimize 31 - __builtin_clz(x) to bsr(x), but generates 31 - (bsr(x) ^ 31)
-
-#elif _MSC_VER
-
-#define _ALLOW_KEYWORD_MACROS
-#include <limits.h> //for SIZE_MAX and UINT_MAX
-#define alignas(a) __declspec(align(a))
-#define thread_local __declspec(thread)
-#define NOINLINE __declspec(noinline)
-#define CAS_LOCK(lock) _InterlockedExchange((long*)lock, 1)
-#define SPINLOCK_RELEASE(lock) _InterlockedExchange((long*)lock, 0)
-#define PAUSE _mm_pause()
-#define BSR(r, v) CODE3264(_BitScanReverse, _BitScanReverse64)((unsigned long*)&r, v)
-CPPCODE(extern "C") long _InterlockedExchange(long volatile *, long);
-CPPCODE(extern "C") void _mm_pause();
-#pragma warning(disable: 4127 4201 4324 4290)//"conditional expression is constant", "nonstandard extension used : nameless struct/union", and "structure was padded due to __declspec(align())"
-
-#else
-#error Unsupported compiler
-#endif
-
-#if __GNUC__ || __INTEL_COMPILER
-#define likely(x) __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
-#else
-#define likely(x) (x)
-#define unlikely(x) (x)
-#endif
-
-static void SPINLOCK_ACQUIRE(volatile int *lock) {if (CAS_LOCK(lock)) while (*lock || CAS_LOCK(lock)) PAUSE;}
-
 #include <assert.h>
 #include <string.h> //for memset
 
-#if SIZE_MAX == UINT_MAX
-#define CODE3264(c32, c64) c32
-#else
-#define CODE3264(c32, c64) c64
-#endif
 typedef char CODE3264_check[sizeof(void*) == CODE3264(4, 8) ? 1 : -1];
 
 #ifdef _WIN32
