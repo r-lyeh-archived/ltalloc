@@ -293,6 +293,7 @@ static volatile int ptrieLock = 0;
 
 static uintptr_t ptrie_lookup(uintptr_t key)
 {
+	SPINLOCK_ACQUIRE(&ptrieLock);
 	PTrieNode *node = ptrieRoot;
 	uintptr_t *lastKey = NULL;
 	while (!((uintptr_t)node & 1))
@@ -302,11 +303,32 @@ static uintptr_t ptrie_lookup(uintptr_t key)
 		node = node->childNodes[branch];
 	}
 	LTALLOC_ASSERT(lastKey && (*lastKey & ~0xFF) == key);
+	SPINLOCK_RELEASE(&ptrieLock);
 	return (uintptr_t)node & ~1;
 }
 
-static void ptrie_insert(uintptr_t key, uintptr_t value, PTrieNode *newNode/* = (PTrieNode*)malloc(sizeof(PTrieNode))*/)
+static bool ptrie_insert(uintptr_t key, uintptr_t value)
 {
+	SPINLOCK_ACQUIRE(&ptrieLock);
+	// First get a new node.
+	PTrieNode *newNode;
+	if (ptrieFreeNodesList)
+		ptrieFreeNodesList = *(PTrieNode**)(newNode = ptrieFreeNodesList);
+	else if (ptrieNewAllocatedPage) {
+		newNode = ptrieNewAllocatedPage;
+		if (!((uintptr_t)++ptrieNewAllocatedPage & (page_size() - 1)))
+			ptrieNewAllocatedPage = ((PTrieNode**)ptrieNewAllocatedPage)[-1];
+	}
+	else {
+		SPINLOCK_RELEASE(&ptrieLock);
+		newNode = (PTrieNode*)VMALLOC(page_size());
+		if (unlikely(!newNode)) { return false; }
+		LTALLOC_ASSERT(((char**)((char*)newNode + page_size()))[-1] == 0);
+		SPINLOCK_ACQUIRE(&ptrieLock);
+		((PTrieNode**)((char*)newNode + page_size()))[-1] = ptrieNewAllocatedPage;//in case if other thread also have just allocated a new page
+		ptrieNewAllocatedPage = newNode + 1;
+	}
+	// Then, insert it.
 	PTrieNode **node = &ptrieRoot, *n;
 	uintptr_t *prevKey = NULL, x, pkey;
 	unsigned int index, b;
@@ -332,7 +354,7 @@ static void ptrie_insert(uintptr_t key, uintptr_t value, PTrieNode *newNode/* = 
 				newNode->keys[0] = key;//left prefixEnd = 0, so all following insertions will be before this node
 				newNode->childNodes[0] = (PTrieNode*)(value | 1);
 				newNode->childNodes[1] = PTRIE_NULL_NODE;
-				return;
+				return true;
 			} else {
 				pkey = *prevKey & ~0xFF;
 				x = key ^ pkey;
@@ -349,6 +371,8 @@ static void ptrie_insert(uintptr_t key, uintptr_t value, PTrieNode *newNode/* = 
 	newNode->childNodes[b] = (PTrieNode*)(value | 1);
 	newNode->childNodes[b^1] = n;
 	*node = newNode;
+	SPINLOCK_RELEASE(&ptrieLock);
+	return true;
 }
 
 static uintptr_t ptrie_remove(uintptr_t key)
@@ -371,6 +395,7 @@ static uintptr_t ptrie_remove(uintptr_t key)
 				*pkey = (n->keys[branch^1] & ~0xFF) | ((*pkey) & 0xFF);
 			*node = other;
 			*(PTrieNode**)n = ptrieFreeNodesList; ptrieFreeNodesList = n;//free(n);
+			SPINLOCK_RELEASE(&ptrieLock);
 			return (uintptr_t)cn & ~1;
 		}
 		pkey = &n->keys[branch];
@@ -427,9 +452,7 @@ static NOINLINE void sys_free(void *p)
 #ifdef _WIN32
 	VirtualFree(p, 0, MEM_RELEASE);
 #else
-	SPINLOCK_ACQUIRE(&ptrieLock);
 	size_t size = ptrie_remove((uintptr_t)p);
-	SPINLOCK_RELEASE(&ptrieLock);
 	munmap(p, size);
 #endif
 }
@@ -750,25 +773,11 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 		p = sys_aligned_alloc(CHUNK_SIZE, size);
 #ifndef _WIN32
 		if (p) {
-			SPINLOCK_ACQUIRE(&ptrieLock);
-			PTrieNode *newNode;
-			if (ptrieFreeNodesList)
-				ptrieFreeNodesList = *(PTrieNode**)(newNode = ptrieFreeNodesList);
-			else if (ptrieNewAllocatedPage) {
-				newNode = ptrieNewAllocatedPage;
-				if (!((uintptr_t)++ptrieNewAllocatedPage & (page_size()-1)))
-					ptrieNewAllocatedPage = ((PTrieNode**)ptrieNewAllocatedPage)[-1];
-			} else {
-				SPINLOCK_RELEASE(&ptrieLock);
-				newNode = (PTrieNode*)VMALLOC(page_size());
-				if (unlikely(!newNode)) { CPPCODE(if (throw_) throw std::bad_alloc(); else) return NULL; }
-				LTALLOC_ASSERT(((char**)((char*)newNode + page_size()))[-1] == 0);
-				SPINLOCK_ACQUIRE(&ptrieLock);
-				((PTrieNode**)((char*)newNode + page_size()))[-1] = ptrieNewAllocatedPage;//in case if other thread also have just allocated a new page
-				ptrieNewAllocatedPage = newNode + 1;
+			if (unlikely(!ptrie_insert((uintptr_t)p, size))) 
+			{
+				VMFREE(p, size);
+				p = NULL;
 			}
-			ptrie_insert((uintptr_t)p, size, newNode);
-			SPINLOCK_RELEASE(&ptrieLock);
 		}
 #endif
 		CPPCODE(if (throw_) if (unlikely(!p)) throw std::bad_alloc();)
@@ -864,9 +873,7 @@ CPPCODE(extern "C") size_t ltmsize(void *p)
 		VirtualQuery(p, &mi, sizeof(mi));
 		return mi.RegionSize;}
 #else
-		SPINLOCK_ACQUIRE(&ptrieLock);
 		size_t size = ptrie_lookup((uintptr_t)p);
-		SPINLOCK_RELEASE(&ptrieLock);
 		return size;
 #endif
 	}
