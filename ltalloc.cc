@@ -289,7 +289,7 @@ typedef struct PTrieNode            // Compressed radix tree (patricia trie) for
 } PTrieNode;                        // 3. Tree always contains just one node with null child (i.e. all but one nodes in any possible tree are always have two children).
 #define PTRIE_NULL_NODE (PTrieNode*)(uintptr_t)1
 static PTrieNode *ptrieRoot = PTRIE_NULL_NODE, *ptrieFreeNodesList = NULL, *ptrieNewAllocatedPage = NULL;
-static volatile int ptrieLock = 0;
+static LTALLOC_SPINLOCK_TYPE ptrieLock = 0;
 
 static uintptr_t ptrie_lookup(uintptr_t key)
 {
@@ -522,7 +522,7 @@ typedef struct alignas(CACHE_LINE_SIZE) ChunkSm//chunk of smallest blocks of siz
 
 typedef struct alignas(CACHE_LINE_SIZE)//align needed to prevent cache line sharing between adjacent classes accessed from different threads
 {
-	volatile int lock;
+	LTALLOC_SPINLOCK_TYPE lock;
 	unsigned int freeBlocksInLastChunk;
 	char *lastChunk;//Chunk or ChunkSm
 	union {
@@ -545,7 +545,7 @@ static thread_local ThreadCache threadCache[NUMBER_OF_SIZE_CLASSES];// = {{0}};
 
 static struct
 {
-	volatile int lock;
+	LTALLOC_SPINLOCK_TYPE lock;
 	void *freeChunk;
 	size_t size;
 } pad = {0, NULL, 0};
