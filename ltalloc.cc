@@ -257,20 +257,44 @@ static void spinlock_acquire(volatile int *lock)
 
 typedef char CODE3264_check[sizeof(void*) == CODE3264(4, 8) ? 1 : -1];
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-
-#define VMALLOC(size) VirtualAlloc(NULL, size, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE)
-#define VMFREE(p, size) VirtualFree(p, 0, MEM_RELEASE)
+// LTALLOC_VMALLOC(size) allocates a size bytes of virtual memory. Returns 0 if allocation fails. The allocated memory is zeroed.
+// LTALLOC_VMFREE(p, size) frees a previously allocated virtual memory.
+// LTALLOC_VMALLOC_MIN_SIZE() returns the minimum size allocatable by LTALLOC_VMALLOC.
+#if defined(LTALLOC_VMALLOC) || defined(LTALLOC_VMFREE) || defined(LTALLOC_VMALLOC_MIN_SIZE)
+#if !defined(LTALLOC_VMALLOC) || !defined(LTALLOC_VMFREE) || !defined(LTALLOC_VMALLOC_MIN_SIZE)
+#	error LTALLOC_VMALLOC, LTALLOC_VMFREE and LTALLOC_VMALLOC_MIN_SIZE must either all be provided, or all left undefined.
+#endif
 
 #else
 
+#ifdef _WIN32
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+static size_t get_alloc_granularity()
+{
+	static DWORD allocationGranularity = 0;
+	if (!allocationGranularity) {
+		SYSTEM_INFO si;
+		GetSystemInfo(&si);
+		allocationGranularity = si.dwAllocationGranularity;
+	}
+	return allocationGranularity;
+}
+
+#define LTALLOC_VMALLOC(size) VirtualAlloc(NULL, size, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE)
+#define LTALLOC_VMFREE(p, size) VirtualFree(p, 0, MEM_RELEASE)
+#define LTALLOC_VMALLOC_MIN_SIZE() get_alloc_granularity()
+
+#else
+
+#ifndef LTALLOC_HAS_VMSIZE
+#define LTALLOC_HAS_VMSIZE 0
+#endif
+
 #include <sys/mman.h>
 #include <unistd.h>
-
-#define VMALLOC(size) (void*)(((uintptr_t)mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE, -1, 0)+1)&~1)//with the conversion of MAP_FAILED to 0
-#define VMFREE(p, size) munmap(p, size)
 
 #include "ltalloc.h"
 
@@ -282,10 +306,55 @@ static size_t page_size()
 	return pagesize;
 }
 
+#define LTALLOC_VMALLOC(size) (void*)(((uintptr_t)mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE, -1, 0)+1)&~1)//with the conversion of MAP_FAILED to 0
+#define LTALLOC_VMFREE(p, size) munmap(p, size)
+#define LTALLOC_VMALLOC_MIN_SIZE() page_size()
+
+#endif
+
+#endif
+
+// LTALLOC_VMSIZE(p) [OPTIONAL] returns the size of the corresponding virtual memory allocation. Define LTALLOC_HAS_VMSIZE to 0 if unavailable.
+#ifdef LTALLOC_HAS_VMSIZE
+#if LTALLOC_HAS_VMSIZE && !defined(LTALLOC_VMSIZE)
+#	error If LTALLOC_HAS_VMSIZE is defined to 1, an implementation of LTALLOC_VMSIZE must be provided.
+#endif
+#if LTALLOC_HAS_VMSIZE == 0
+#	undef LTALLOC_VMSIZE
+#endif
+#else
+
+#ifdef _WIN32
+#define LTALLOC_HAS_VMSIZE 1
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+static size_t get_alloc_size(void *p)
+{
+	MEMORY_BASIC_INFORMATION mi;
+	VirtualQuery(p, &mi, sizeof(mi));
+	return mi.RegionSize;
+}
+
+#define LTALLOC_VMSIZE(p) get_alloc_size(p)
+
+#else
+#define LTALLOC_HAS_VMSIZE 0
+#endif
+#endif
+
+// If LTALLOC_HAS_VMSIZE is not 1, fallback to storing allocation sizes in a ptrie.
+// Note: it's also possible to force the ptrie function to be declared without actually being used in the allocator, for testing pruposes.
+#ifndef LTALLOC_DECLARE_PTRIE
+#define LTALLOC_DECLARE_PTRIE (LTALLOC_HAS_VMSIZE == 0)
+#endif
+
+#if LTALLOC_DECLARE_PTRIE
 typedef struct PTrieNode            // Compressed radix tree (patricia trie) for storing sizes of system allocations
 {                                   // This implementation have some specific properties:
-    uintptr_t keys[2];              // 1. There are no separate leaf nodes (with both null children), as leaf's value is stored directly in place of corresponding child node pointer. Least significant bit of that pointer used to determine its meaning (i.e., is it a value, or child node pointer).
-    struct PTrieNode *childNodes[2];// 2. Inserting a new element (key/value) into this tree require to create always an exactly one new node (and similarly for remove key/node operation).
+	uintptr_t keys[2];              // 1. There are no separate leaf nodes (with both null children), as leaf's value is stored directly in place of corresponding child node pointer. Least significant bit of that pointer used to determine its meaning (i.e., is it a value, or child node pointer).
+	struct PTrieNode *childNodes[2];// 2. Inserting a new element (key/value) into this tree require to create always an exactly one new node (and similarly for remove key/node operation).
 } PTrieNode;                        // 3. Tree always contains just one node with null child (i.e. all but one nodes in any possible tree are always have two children).
 #define PTRIE_NULL_NODE (PTrieNode*)(uintptr_t)1
 static PTrieNode *ptrieRoot = PTRIE_NULL_NODE, *ptrieFreeNodesList = NULL, *ptrieNewAllocatedPage = NULL;
@@ -311,21 +380,24 @@ static bool ptrie_insert(uintptr_t key, uintptr_t value)
 {
 	SPINLOCK_ACQUIRE(&ptrieLock);
 	// First get a new node.
-	PTrieNode *newNode;
+	// The nodes are stored in memory pages allocated for that single purpose. Free nodes are arranged in a free list
+	// (the first bytes in the node points to the next free page). The last bytes of the page are used to point to the
+	// next free page, in case several pages where allocated at the same time by different threads.
+	PTrieNode* newNode;
 	if (ptrieFreeNodesList)
 		ptrieFreeNodesList = *(PTrieNode**)(newNode = ptrieFreeNodesList);
 	else if (ptrieNewAllocatedPage) {
 		newNode = ptrieNewAllocatedPage;
-		if (!((uintptr_t)++ptrieNewAllocatedPage & (page_size() - 1)))
+		if (!((uintptr_t)++ptrieNewAllocatedPage & (LTALLOC_VMALLOC_MIN_SIZE() - 1)))
 			ptrieNewAllocatedPage = ((PTrieNode**)ptrieNewAllocatedPage)[-1];
 	}
 	else {
 		SPINLOCK_RELEASE(&ptrieLock);
-		newNode = (PTrieNode*)VMALLOC(page_size());
+		newNode = (PTrieNode*)LTALLOC_VMALLOC(LTALLOC_VMALLOC_MIN_SIZE());
 		if (unlikely(!newNode)) { return false; }
-		LTALLOC_ASSERT(((char**)((char*)newNode + page_size()))[-1] == 0);
+		LTALLOC_ASSERT(((char**)((char*)newNode + LTALLOC_VMALLOC_MIN_SIZE()))[-1] == 0);
 		SPINLOCK_ACQUIRE(&ptrieLock);
-		((PTrieNode**)((char*)newNode + page_size()))[-1] = ptrieNewAllocatedPage;//in case if other thread also have just allocated a new page
+		((PTrieNode**)((char*)newNode + LTALLOC_VMALLOC_MIN_SIZE()))[-1] = ptrieNewAllocatedPage;//in case if other thread also have just allocated a new page
 		ptrieNewAllocatedPage = newNode + 1;
 	}
 	// Then, insert it.
@@ -404,58 +476,83 @@ static uintptr_t ptrie_remove(uintptr_t key)
 }
 #endif
 
+static NOINLINE void sys_free(void *p)
+{
+	if (p == NULL) return;
+#if LTALLOC_HAS_VMSIZE
+	// Note: on Windows, VirtualFree doesn't not need the size, but calling LTALLOC_VMSIZE does not cost anything since
+	// it gets removed during the expansion of LTALLOC_VMFREE.
+	LTALLOC_VMFREE(p, LTALLOC_VMSIZE(p));
+#else
+	size_t size = ptrie_remove((uintptr_t)p);
+	LTALLOC_VMFREE(p, size);
+#endif
+}
+
+// LTALLOC_VMALLOC_ALIGNED(alignment, size) [OPTIONAL] allocates virtual memory with a certain alignment.
+// If this macro is not defined, ltalloc implements a fallback involving calling VMALLOC potentially several times.
+// If the target platform has an API for aligned virtual memory allocation, it may be more efficient to implemnt this macro with it.
+#ifndef LTALLOC_VMALLOC_ALIGNED
+
+#ifdef _WIN32
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 static void *sys_aligned_alloc(size_t alignment, size_t size)
 {
-	void *p = VMALLOC(size);//optimistically try mapping precisely the right amount before falling back to the slow method
-	LTALLOC_ASSERT(!(alignment & (alignment-1)) && "alignment must be a power of two");
-	if ((uintptr_t)p & (alignment-1)/* && p != MAP_FAILED*/)
+	void *p = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);//optimistically try mapping precisely the right amount before falling back to the slow method
+	LTALLOC_ASSERT(!(alignment & (alignment - 1)) && "alignment must be a power of two");
+	if ((uintptr_t)p & (alignment - 1)/* && p != MAP_FAILED*/)
 	{
-		VMFREE(p, size);
-#ifdef _WIN32
-		{static DWORD allocationGranularity = 0;
+		VirtualFree(p, 0, MEM_RELEASE);
+		static DWORD allocationGranularity = 0;
 		if (!allocationGranularity) {
 			SYSTEM_INFO si;
 			GetSystemInfo(&si);
 			allocationGranularity = si.dwAllocationGranularity;
 		}
-		if ((uintptr_t)p < 16*1024*1024)//fill "bubbles" (reserve unaligned regions) at the beginning of virtual address space, otherwise there will be always falling back to the slow method
-			VirtualAlloc(p, alignment - ((uintptr_t)p & (alignment-1)), MEM_RESERVE, PAGE_NOACCESS);
+		if ((uintptr_t)p < 16 * 1024 * 1024)//fill "bubbles" (reserve unaligned regions) at the beginning of virtual address space, otherwise there will be always falling back to the slow method
+			VirtualAlloc(p, alignment - ((uintptr_t)p & (alignment - 1)), MEM_RESERVE, PAGE_NOACCESS);
 		do
 		{
 			p = VirtualAlloc(NULL, size + alignment - allocationGranularity, MEM_RESERVE, PAGE_NOACCESS);
 			if (p == NULL) return NULL;
 			VirtualFree(p, 0, MEM_RELEASE);//unfortunately, WinAPI doesn't support release a part of allocated region, so release a whole region
-			p = VirtualAlloc((void*)(((uintptr_t)p + (alignment-1)) & ~(alignment-1)), size, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
-		} while (p == NULL);}
-#else
-		p = VMALLOC(size + alignment - page_size());
-		if (p/* != MAP_FAILED*/)
-		{
-			uintptr_t ap = ((uintptr_t)p + (alignment-1)) & ~(alignment-1);
-			uintptr_t diff = ap - (uintptr_t)p;
-			if (diff) VMFREE(p, diff);
-			diff = alignment - page_size() - diff;
-			LTALLOC_ASSERT((intptr_t)diff >= 0);
-			if (diff) VMFREE((void*)(ap + size), diff);
-			return (void*)ap;
-		}
-#endif
+			p = VirtualAlloc((void*)(((uintptr_t)p + (alignment - 1)) & ~(alignment - 1)), size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+		} while (p == NULL);
 	}
-	//if (p == 0) p = sys_aligned_alloc(alignment, size);//just in case (because 0 pointer is handled specially elsewhere)
-	//if (p == MAP_FAILED) p = NULL;
 	return p;
 }
 
-static NOINLINE void sys_free(void *p)
-{
-	if (p == NULL) return;
-#ifdef _WIN32
-	VirtualFree(p, 0, MEM_RELEASE);
 #else
-	size_t size = ptrie_remove((uintptr_t)p);
-	munmap(p, size);
-#endif
+
+static void *sys_aligned_alloc(size_t alignment, size_t size)
+{
+	void *p = LTALLOC_VMALLOC(size);//optimistically try mapping precisely the right amount before falling back to the slow method
+	LTALLOC_ASSERT(!(alignment & (alignment - 1)) && "alignment must be a power of two");
+	if ((uintptr_t)p & (alignment - 1))
+	{
+		LTALLOC_VMFREE(p, size);
+		p = LTALLOC_VMALLOC(size + alignment - LTALLOC_VMALLOC_MIN_SIZE());
+		if (p)
+		{
+			uintptr_t ap = ((uintptr_t)p + (alignment - 1)) & ~(alignment - 1);
+			uintptr_t diff = ap - (uintptr_t)p;
+			if (diff) LTALLOC_VMFREE(p, diff);
+			diff = alignment - LTALLOC_VMALLOC_MIN_SIZE() - diff;
+			LTALLOC_ASSERT((intptr_t)diff >= 0);
+			if (diff) LTALLOC_VMFREE((void*)(ap + size), diff);
+			return (void*)ap;
+		}
+	}
+	
+	return p;
 }
+#endif
+
+#define LTALLOC_VMALLOC_ALIGNED(alignment, size) sys_aligned_alloc(alignment, size)
+#endif
 
 static void release_thread_cache(void*);
 #ifdef __GNUC__
@@ -689,7 +786,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 				((char**)((char*)p + CHUNK_SIZE))[-1] = 0;
 			} else {
 				SPINLOCK_RELEASE(&pad.lock);
-				p = sys_aligned_alloc(CHUNK_SIZE, CHUNK_SIZE);
+				p = LTALLOC_VMALLOC_ALIGNED(CHUNK_SIZE, CHUNK_SIZE);
 				if (unlikely(!p)) { CPPCODE(if (throw_) throw std::bad_alloc(); else) return NULL; }
 			}
 
@@ -770,12 +867,12 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 		if (unlikely(size == 0)) return ltmalloc CPPCODE(<throw_>)(1);//return NULL;//doing this check here is better than on the top level
 
 		size = (size + CHUNK_SIZE-1) & ~(CHUNK_SIZE-1);
-		p = sys_aligned_alloc(CHUNK_SIZE, size);
-#ifndef _WIN32
+		p = LTALLOC_VMALLOC_ALIGNED(CHUNK_SIZE, size);
+#if LTALLOC_HAS_VMSIZE == 0
 		if (p) {
 			if (unlikely(!ptrie_insert((uintptr_t)p, size))) 
 			{
-				VMFREE(p, size);
+				LTALLOC_VMFREE(p, size);
 				p = NULL;
 			}
 		}
@@ -868,10 +965,8 @@ CPPCODE(extern "C") size_t ltmsize(void *p)
 	else
 	{
 		if (p == NULL) return 0;
-#ifdef _WIN32
-		{MEMORY_BASIC_INFORMATION mi;
-		VirtualQuery(p, &mi, sizeof(mi));
-		return mi.RegionSize;}
+#if LTALLOC_HAS_VMSIZE
+		return LTALLOC_VMSIZE(p);
 #else
 		size_t size = ptrie_lookup((uintptr_t)p);
 		return size;
@@ -935,7 +1030,7 @@ CPPCODE(extern "C") void ltsqueeze(size_t padsz)
 
 		//1. Find out chunks with only free blocks via a simple counting the number of free blocks in each chunk
 		{char buffer[32*1024];//enough for 1GB address space
-		unsigned short *inChunkFreeBlocks = (unsigned short*)(bufferSize <= sizeof(buffer) ? memset(buffer, 0, bufferSize) : VMALLOC(bufferSize));
+		unsigned short *inChunkFreeBlocks = (unsigned short*)(bufferSize <= sizeof(buffer) ? memset(buffer, 0, bufferSize) : LTALLOC_VMALLOC(bufferSize));
 		unsigned int numBlocksInChunk = (CHUNK_SIZE - (/*CHUNK_IS_SMALL ? sizeof(ChunkSm) : */sizeof(Chunk)))/class_to_size(sizeClass);
 		FreeBlock **pbatch, *block, **pblock;
 		Chunk *firstFreeChunk = NULL;
@@ -1036,7 +1131,7 @@ continue_:;
 			cc->freeList = freeList;\
 			cc->freeListSize += freeListSize;\
 			SPINLOCK_RELEASE(&cc->lock);\
-			if (bufferSize > sizeof(buffer)) VMFREE(inChunkFreeBlocks, bufferSize);//this better to do before 3. as kernel is likely optimized for release of just allocated range
+			if (bufferSize > sizeof(buffer)) LTALLOC_VMFREE(inChunkFreeBlocks, bufferSize);//this better to do before 3. as kernel is likely optimized for release of just allocated range
 			GIVE_LISTS_BACK_TO_CC
 
 			if (padsz)
@@ -1061,7 +1156,7 @@ continue_:;
 			while (firstFreeChunk)
 			{
 				Chunk *nextFreeChunk = *(Chunk**)firstFreeChunk;
-				VMFREE(firstFreeChunk, CHUNK_SIZE);
+				LTALLOC_VMFREE(firstFreeChunk, CHUNK_SIZE);
 				firstFreeChunk = nextFreeChunk;
 			}
 		}
