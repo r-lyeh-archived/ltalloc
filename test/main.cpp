@@ -21,12 +21,12 @@ void threadproc(int* error)
 				*error = true;
 				return;
 			}
-			p[t ^ 1] = new char[128];
-			delete[] p[t];
+			p[t ^ 1] = (char*)ltmalloc(128);
+			ltfree(p[t]);
 			p[t] = NULL;
 		}
 	for (unsigned int i = 0; i < 2 * N; i++)
-		delete[] ((char**)pp)[i];
+		ltfree(((char**)pp)[i]);
 }
 
 TEST_CASE("Original test code from the wiki", "[ltalloc]")
