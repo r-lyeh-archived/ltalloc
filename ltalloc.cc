@@ -357,13 +357,20 @@ typedef struct PTrieNode            // Compressed radix tree (patricia trie) for
 	struct PTrieNode *childNodes[2];// 2. Inserting a new element (key/value) into this tree require to create always an exactly one new node (and similarly for remove key/node operation).
 } PTrieNode;                        // 3. Tree always contains just one node with null child (i.e. all but one nodes in any possible tree are always have two children).
 #define PTRIE_NULL_NODE (PTrieNode*)(uintptr_t)1
-static PTrieNode *ptrieRoot = PTRIE_NULL_NODE, *ptrieFreeNodesList = NULL, *ptrieNewAllocatedPage = NULL;
-static LTALLOC_SPINLOCK_TYPE ptrieLock = 0;
-
-static uintptr_t ptrie_lookup(uintptr_t key)
+typedef struct PTrie
 {
-	SPINLOCK_ACQUIRE(&ptrieLock);
-	PTrieNode *node = ptrieRoot;
+	PTrieNode *root;
+	PTrieNode *freeNodesList;
+	PTrieNode *newAllocatedPage;
+	LTALLOC_SPINLOCK_TYPE lock;
+} PTrie;
+
+PTrie largeAllocSizes = { PTRIE_NULL_NODE, NULL, NULL };
+
+static uintptr_t ptrie_lookup(PTrie *ptrie, uintptr_t key)
+{
+	SPINLOCK_ACQUIRE(&ptrie->lock);
+	PTrieNode *node = ptrie->root;
 	uintptr_t *lastKey = NULL;
 	while (!((uintptr_t)node & 1))
 	{
@@ -372,36 +379,36 @@ static uintptr_t ptrie_lookup(uintptr_t key)
 		node = node->childNodes[branch];
 	}
 	LTALLOC_ASSERT(lastKey && (*lastKey & ~0xFF) == key);
-	SPINLOCK_RELEASE(&ptrieLock);
+	SPINLOCK_RELEASE(&ptrie->lock);
 	return (uintptr_t)node & ~1;
 }
 
-static bool ptrie_insert(uintptr_t key, uintptr_t value)
+static bool ptrie_insert(PTrie *ptrie, uintptr_t key, uintptr_t value)
 {
-	SPINLOCK_ACQUIRE(&ptrieLock);
+	SPINLOCK_ACQUIRE(&ptrie->lock);
 	// First get a new node.
 	// The nodes are stored in memory pages allocated for that single purpose. Free nodes are arranged in a free list
 	// (the first bytes in the node points to the next free page). The last bytes of the page are used to point to the
 	// next free page, in case several pages where allocated at the same time by different threads.
 	PTrieNode* newNode;
-	if (ptrieFreeNodesList)
-		ptrieFreeNodesList = *(PTrieNode**)(newNode = ptrieFreeNodesList);
-	else if (ptrieNewAllocatedPage) {
-		newNode = ptrieNewAllocatedPage;
-		if (!((uintptr_t)++ptrieNewAllocatedPage & (LTALLOC_VMALLOC_MIN_SIZE() - 1)))
-			ptrieNewAllocatedPage = ((PTrieNode**)ptrieNewAllocatedPage)[-1];
+	if (ptrie->freeNodesList)
+		ptrie->freeNodesList = *(PTrieNode**)(newNode = ptrie->freeNodesList);
+	else if (ptrie->newAllocatedPage) {
+		newNode = ptrie->newAllocatedPage;
+		if (!((uintptr_t)++ptrie->newAllocatedPage & (LTALLOC_VMALLOC_MIN_SIZE() - 1)))
+			ptrie->newAllocatedPage = ((PTrieNode**)ptrie->newAllocatedPage)[-1];
 	}
 	else {
-		SPINLOCK_RELEASE(&ptrieLock);
+		SPINLOCK_RELEASE(&ptrie->lock);
 		newNode = (PTrieNode*)LTALLOC_VMALLOC(LTALLOC_VMALLOC_MIN_SIZE());
 		if (unlikely(!newNode)) { return false; }
 		LTALLOC_ASSERT(((char**)((char*)newNode + LTALLOC_VMALLOC_MIN_SIZE()))[-1] == 0);
-		SPINLOCK_ACQUIRE(&ptrieLock);
-		((PTrieNode**)((char*)newNode + LTALLOC_VMALLOC_MIN_SIZE()))[-1] = ptrieNewAllocatedPage;//in case if other thread also have just allocated a new page
-		ptrieNewAllocatedPage = newNode + 1;
+		SPINLOCK_ACQUIRE(&ptrie->lock);
+		((PTrieNode**)((char*)newNode + LTALLOC_VMALLOC_MIN_SIZE()))[-1] = ptrie->newAllocatedPage;//in case if other thread also have just allocated a new page
+		ptrie->newAllocatedPage = newNode + 1;
 	}
 	// Then, insert it.
-	PTrieNode **node = &ptrieRoot, *n;
+	PTrieNode **node = &ptrie->root, *n;
 	uintptr_t *prevKey = NULL, x, pkey;
 	unsigned int index, b;
 	LTALLOC_ASSERT(!((value & 1) | (key & 0xFF)));//check constraints for key/value
@@ -443,15 +450,15 @@ static bool ptrie_insert(uintptr_t key, uintptr_t value)
 	newNode->childNodes[b] = (PTrieNode*)(value | 1);
 	newNode->childNodes[b^1] = n;
 	*node = newNode;
-	SPINLOCK_RELEASE(&ptrieLock);
+	SPINLOCK_RELEASE(&ptrie->lock);
 	return true;
 }
 
-static uintptr_t ptrie_remove(uintptr_t key)
+static uintptr_t ptrie_remove(PTrie *ptrie, uintptr_t key)
 {
-	PTrieNode **node = &ptrieRoot;
+	PTrieNode **node = &ptrie->root;
 	uintptr_t *pkey = NULL;
-	LTALLOC_ASSERT(ptrieRoot != PTRIE_NULL_NODE && "trie is empty!");
+	LTALLOC_ASSERT(ptrie->root != PTRIE_NULL_NODE && "trie is empty!");
 	for (;;)
 	{
 		PTrieNode *n = *node;
@@ -466,8 +473,8 @@ static uintptr_t ptrie_remove(uintptr_t key)
 			if (((uintptr_t)other & 1) && other != PTRIE_NULL_NODE)//if other node is not a pointer
 				*pkey = (n->keys[branch^1] & ~0xFF) | ((*pkey) & 0xFF);
 			*node = other;
-			*(PTrieNode**)n = ptrieFreeNodesList; ptrieFreeNodesList = n;//free(n);
-			SPINLOCK_RELEASE(&ptrieLock);
+			*(PTrieNode**)n = ptrie->freeNodesList; ptrie->freeNodesList = n;//free(n);
+			SPINLOCK_RELEASE(&ptrie->lock);
 			return (uintptr_t)cn & ~1;
 		}
 		pkey = &n->keys[branch];
@@ -484,7 +491,7 @@ static NOINLINE void sys_free(void *p)
 	// it gets removed during the expansion of LTALLOC_VMFREE.
 	LTALLOC_VMFREE(p, LTALLOC_VMSIZE(p));
 #else
-	size_t size = ptrie_remove((uintptr_t)p);
+	size_t size = ptrie_remove(&largeAllocSizes, (uintptr_t)p);
 	LTALLOC_VMFREE(p, size);
 #endif
 }
@@ -870,7 +877,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 		p = LTALLOC_VMALLOC_ALIGNED(CHUNK_SIZE, size);
 #if LTALLOC_HAS_VMSIZE == 0
 		if (p) {
-			if (unlikely(!ptrie_insert((uintptr_t)p, size))) 
+			if (unlikely(!ptrie_insert(&largeAllocSizes, (uintptr_t)p, size)))
 			{
 				LTALLOC_VMFREE(p, size);
 				p = NULL;
@@ -968,7 +975,7 @@ CPPCODE(extern "C") size_t ltmsize(void *p)
 #if LTALLOC_HAS_VMSIZE
 		return LTALLOC_VMSIZE(p);
 #else
-		size_t size = ptrie_lookup((uintptr_t)p);
+		size_t size = ptrie_lookup(&largeAllocSizes, (uintptr_t)p);
 		return size;
 #endif
 	}
