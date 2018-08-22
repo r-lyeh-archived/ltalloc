@@ -595,19 +595,6 @@ static uintptr_t ptrie_remove(PTrie *ptrie, uintptr_t key)
 }
 #endif
 
-static NOINLINE void sys_free(void *p)
-{
-	if (p == NULL) return;
-#if LTALLOC_HAS_VMSIZE
-	// Note: on Windows, VirtualFree doesn't not need the size, but calling LTALLOC_VMSIZE does not cost anything since
-	// it gets removed during the expansion of LTALLOC_VMFREE.
-	LTALLOC_VMFREE(p, LTALLOC_VMSIZE(p));
-#else
-	size_t size = ptrie_remove(&largeAllocSizes, (uintptr_t)p);
-	LTALLOC_VMFREE(p, size);
-#endif
-}
-
 #define CHUNK_SIZE                         LTALLOC_CHUNK_SIZE
 #define CACHE_LINE_SIZE                    LTALLOC_CACHE_LINE_SIZE
 #define MAX_NUM_OF_BLOCKS_IN_BATCH         LTALLOC_MAX_NUM_OF_BLOCKS_IN_BATCH
@@ -974,7 +961,17 @@ CPPCODE(extern "C") void ltfree(void *p)
 		tc->freeList = (FreeBlock*)p;
 	}
 	else
-		sys_free(p);
+	{
+		if (p == NULL) return;
+#if LTALLOC_HAS_VMSIZE
+		// Note: on Windows, VirtualFree doesn't not need the size, but calling LTALLOC_VMSIZE does not cost anything since
+		// it gets removed during the expansion of LTALLOC_VMFREE.
+		LTALLOC_VMFREE(p, LTALLOC_VMSIZE(p));
+#else
+		size_t size = ptrie_remove(&largeAllocSizes, (uintptr_t)p);
+		LTALLOC_VMFREE(p, size);
+#endif
+	}
 }
 
 CPPCODE(extern "C") size_t ltmsize(void *p)
