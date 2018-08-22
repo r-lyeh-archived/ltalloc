@@ -344,6 +344,118 @@ static size_t get_alloc_size(void *p)
 #endif
 #endif
 
+// LTALLOC_VMALLOC_ALIGNED(alignment, size) [OPTIONAL] allocates virtual memory with a certain alignment.
+// If this macro is not defined, ltalloc implements a fallback involving calling VMALLOC potentially several times.
+// If the target platform has an API for aligned virtual memory allocation, it may be more efficient to implemnt this macro with it.
+#ifndef LTALLOC_VMALLOC_ALIGNED
+
+#ifdef _WIN32
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+static void *sys_aligned_alloc(size_t alignment, size_t size)
+{
+	void *p = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);//optimistically try mapping precisely the right amount before falling back to the slow method
+	LTALLOC_ASSERT(!(alignment & (alignment - 1)) && "alignment must be a power of two");
+	if ((uintptr_t)p & (alignment - 1)/* && p != MAP_FAILED*/)
+	{
+		VirtualFree(p, 0, MEM_RELEASE);
+		static DWORD allocationGranularity = 0;
+		if (!allocationGranularity) {
+			SYSTEM_INFO si;
+			GetSystemInfo(&si);
+			allocationGranularity = si.dwAllocationGranularity;
+		}
+		if ((uintptr_t)p < 16 * 1024 * 1024)//fill "bubbles" (reserve unaligned regions) at the beginning of virtual address space, otherwise there will be always falling back to the slow method
+			VirtualAlloc(p, alignment - ((uintptr_t)p & (alignment - 1)), MEM_RESERVE, PAGE_NOACCESS);
+		do
+		{
+			p = VirtualAlloc(NULL, size + alignment - allocationGranularity, MEM_RESERVE, PAGE_NOACCESS);
+			if (p == NULL) return NULL;
+			VirtualFree(p, 0, MEM_RELEASE);//unfortunately, WinAPI doesn't support release a part of allocated region, so release a whole region
+			p = VirtualAlloc((void*)(((uintptr_t)p + (alignment - 1)) & ~(alignment - 1)), size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+		} while (p == NULL);
+	}
+	return p;
+}
+
+#else
+
+static void *sys_aligned_alloc(size_t alignment, size_t size)
+{
+	void *p = LTALLOC_VMALLOC(size);//optimistically try mapping precisely the right amount before falling back to the slow method
+	LTALLOC_ASSERT(!(alignment & (alignment - 1)) && "alignment must be a power of two");
+	if ((uintptr_t)p & (alignment - 1))
+	{
+		LTALLOC_VMFREE(p, size);
+		p = LTALLOC_VMALLOC(size + alignment - LTALLOC_VMALLOC_MIN_SIZE());
+		if (p)
+		{
+			uintptr_t ap = ((uintptr_t)p + (alignment - 1)) & ~(alignment - 1);
+			uintptr_t diff = ap - (uintptr_t)p;
+			if (diff) LTALLOC_VMFREE(p, diff);
+			diff = alignment - LTALLOC_VMALLOC_MIN_SIZE() - diff;
+			LTALLOC_ASSERT((intptr_t)diff >= 0);
+			if (diff) LTALLOC_VMFREE((void*)(ap + size), diff);
+			return (void*)ap;
+		}
+	}
+	
+	return p;
+}
+#endif
+
+#define LTALLOC_VMALLOC_ALIGNED(alignment, size) sys_aligned_alloc(alignment, size)
+#endif
+
+// Define to 1 to enable an automatic call to release_thread_cache() when a thread exits. This function must be called
+// to make sure no memory is leaked when a thread exits. If not supported by the current platform, it will cause a
+// compilation error. In this case, define to 0 and call ltonthreadexit() manually before a thread exits.
+#ifndef LTALLOC_AUTO_RELEASE_THREAD_CACHE
+#define LTALLOC_AUTO_RELEASE_THREAD_CACHE 1
+#endif
+
+#if LTALLOC_AUTO_RELEASE_THREAD_CACHE
+static void release_thread_cache(void*);
+#ifdef __GNUC__
+#include <pthread.h>
+#pragma weak pthread_once
+#pragma weak pthread_key_create
+#pragma weak pthread_setspecific
+static pthread_key_t pthread_key;
+static pthread_once_t init_once = PTHREAD_ONCE_INIT;
+static void init_pthread_key() { pthread_key_create(&pthread_key, release_thread_cache); }
+static thread_local int thread_initialized = 0;
+static void init_pthread_destructor()//must be called only when some block placed into a thread cache's free list
+{
+	if (unlikely(!thread_initialized))
+	{
+		thread_initialized = 1;
+		if (pthread_once)
+		{
+			pthread_once(&init_once, init_pthread_key);
+			pthread_setspecific(pthread_key, (void*)1);//set nonzero value to force calling of release_thread_cache() on thread terminate
+		}
+	}
+}
+#elif defined(_WIN32)
+static void NTAPI on_tls_callback(PVOID h, DWORD reason, PVOID pv) { h; pv; if (reason == DLL_THREAD_DETACH) release_thread_cache(0); }
+#pragma comment(linker, "/INCLUDE:" CODE3264("_","") "p_thread_callback_ltalloc")
+#pragma const_seg(".CRT$XLL")
+extern CPPCODE("C") const PIMAGE_TLS_CALLBACK p_thread_callback_ltalloc = on_tls_callback;
+#pragma const_seg()
+#define init_pthread_destructor()
+#else
+#error No automatic solution is implemented for this platform, you have to call ltonthreadexit() manually when a thread exits.
+#endif
+#else
+#define init_pthread_destructor()
+#endif
+
+// End of platform-specific stuff
+//////////////////////////////////////////////////////////////////////////
+
 // If LTALLOC_HAS_VMSIZE is not 1, fallback to storing allocation sizes in a ptrie.
 // Note: it's also possible to force the ptrie function to be declared without actually being used in the allocator, for testing pruposes.
 #ifndef LTALLOC_DECLARE_PTRIE
@@ -495,104 +607,6 @@ static NOINLINE void sys_free(void *p)
 	LTALLOC_VMFREE(p, size);
 #endif
 }
-
-// LTALLOC_VMALLOC_ALIGNED(alignment, size) [OPTIONAL] allocates virtual memory with a certain alignment.
-// If this macro is not defined, ltalloc implements a fallback involving calling VMALLOC potentially several times.
-// If the target platform has an API for aligned virtual memory allocation, it may be more efficient to implemnt this macro with it.
-#ifndef LTALLOC_VMALLOC_ALIGNED
-
-#ifdef _WIN32
-
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-
-static void *sys_aligned_alloc(size_t alignment, size_t size)
-{
-	void *p = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);//optimistically try mapping precisely the right amount before falling back to the slow method
-	LTALLOC_ASSERT(!(alignment & (alignment - 1)) && "alignment must be a power of two");
-	if ((uintptr_t)p & (alignment - 1)/* && p != MAP_FAILED*/)
-	{
-		VirtualFree(p, 0, MEM_RELEASE);
-		static DWORD allocationGranularity = 0;
-		if (!allocationGranularity) {
-			SYSTEM_INFO si;
-			GetSystemInfo(&si);
-			allocationGranularity = si.dwAllocationGranularity;
-		}
-		if ((uintptr_t)p < 16 * 1024 * 1024)//fill "bubbles" (reserve unaligned regions) at the beginning of virtual address space, otherwise there will be always falling back to the slow method
-			VirtualAlloc(p, alignment - ((uintptr_t)p & (alignment - 1)), MEM_RESERVE, PAGE_NOACCESS);
-		do
-		{
-			p = VirtualAlloc(NULL, size + alignment - allocationGranularity, MEM_RESERVE, PAGE_NOACCESS);
-			if (p == NULL) return NULL;
-			VirtualFree(p, 0, MEM_RELEASE);//unfortunately, WinAPI doesn't support release a part of allocated region, so release a whole region
-			p = VirtualAlloc((void*)(((uintptr_t)p + (alignment - 1)) & ~(alignment - 1)), size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-		} while (p == NULL);
-	}
-	return p;
-}
-
-#else
-
-static void *sys_aligned_alloc(size_t alignment, size_t size)
-{
-	void *p = LTALLOC_VMALLOC(size);//optimistically try mapping precisely the right amount before falling back to the slow method
-	LTALLOC_ASSERT(!(alignment & (alignment - 1)) && "alignment must be a power of two");
-	if ((uintptr_t)p & (alignment - 1))
-	{
-		LTALLOC_VMFREE(p, size);
-		p = LTALLOC_VMALLOC(size + alignment - LTALLOC_VMALLOC_MIN_SIZE());
-		if (p)
-		{
-			uintptr_t ap = ((uintptr_t)p + (alignment - 1)) & ~(alignment - 1);
-			uintptr_t diff = ap - (uintptr_t)p;
-			if (diff) LTALLOC_VMFREE(p, diff);
-			diff = alignment - LTALLOC_VMALLOC_MIN_SIZE() - diff;
-			LTALLOC_ASSERT((intptr_t)diff >= 0);
-			if (diff) LTALLOC_VMFREE((void*)(ap + size), diff);
-			return (void*)ap;
-		}
-	}
-	
-	return p;
-}
-#endif
-
-#define LTALLOC_VMALLOC_ALIGNED(alignment, size) sys_aligned_alloc(alignment, size)
-#endif
-
-static void release_thread_cache(void*);
-#ifdef __GNUC__
-#include <pthread.h>
-#pragma weak pthread_once
-#pragma weak pthread_key_create
-#pragma weak pthread_setspecific
-static pthread_key_t pthread_key;
-static pthread_once_t init_once = PTHREAD_ONCE_INIT;
-static void init_pthread_key() { pthread_key_create(&pthread_key, release_thread_cache); }
-static thread_local int thread_initialized = 0;
-static void init_pthread_destructor()//must be called only when some block placed into a thread cache's free list
-{
-	if (unlikely(!thread_initialized))
-	{
-		thread_initialized = 1;
-		if (pthread_once)
-		{
-			pthread_once(&init_once, init_pthread_key);
-			pthread_setspecific(pthread_key, (void*)1);//set nonzero value to force calling of release_thread_cache() on thread terminate
-		}
-	}
-}
-#else
-static void NTAPI on_tls_callback(PVOID h, DWORD reason, PVOID pv) { h; pv; if (reason == DLL_THREAD_DETACH) release_thread_cache(0); }
-#pragma comment(linker, "/INCLUDE:" CODE3264("_","") "p_thread_callback_ltalloc")
-#pragma const_seg(".CRT$XLL")
-extern CPPCODE("C") const PIMAGE_TLS_CALLBACK p_thread_callback_ltalloc = on_tls_callback;
-#pragma const_seg()
-#define init_pthread_destructor()
-#endif
-
-//End of platform-specific stuff
 
 #define CHUNK_SIZE                         LTALLOC_CHUNK_SIZE
 #define CACHE_LINE_SIZE                    LTALLOC_CACHE_LINE_SIZE
@@ -1007,8 +1021,17 @@ static void release_thread_cache(void *p)
 				cc->freeListSize += freeListSize;
 			}
 			SPINLOCK_RELEASE(&cc->lock);
+
+			tc->freeList = NULL;
+			tc->tempList = NULL;
+			tc->counter = 0;
 		}
 	}
+}
+
+CPPCODE(extern "C") void ltonthreadexit()
+{
+	release_thread_cache(0);
 }
 
 CPPCODE(extern "C") void ltsqueeze(size_t padsz)
