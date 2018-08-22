@@ -545,6 +545,7 @@ static bool ptrie_insert(PTrie *ptrie, uintptr_t key, uintptr_t value)
 				newNode->keys[0] = key;//left prefixEnd = 0, so all following insertions will be before this node
 				newNode->childNodes[0] = (PTrieNode*)(value | 1);
 				newNode->childNodes[1] = PTRIE_NULL_NODE;
+				SPINLOCK_RELEASE(&ptrie->lock);
 				return true;
 			} else {
 				pkey = *prevKey & ~0xFF;
