@@ -46,6 +46,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include LTALLOC_USER_CONFIG
 #endif
 
+#ifdef __cplusplus
+#include <new>
+#define CPPCODE(code) code
+#else
+#define CPPCODE(code)
+#endif
+
 //////////////////////////////////////////////////////////////////////////
 // Customizable constants
 
@@ -232,29 +239,6 @@ static void spinlock_acquire(volatile int *lock)
 #define CODE3264(c32, c64) c32
 #endif
 
-#ifdef _MSC_VER
-#define _ALLOW_KEYWORD_MACROS
-#endif
-
-// Let's minimize the change to the code below by keeping the old defined for now.
-#define alignas(a)             LTALLOC_ALIGNAS(a)
-#define thread_local           LTALLOC_THREAD_LOCAL
-#define NOINLINE               LTALLOC_NOINLINE
-#define likely(x)              LTALLOC_LIKELY(x)
-#define unlikely(x)            LTALLOC_UNLIKELY(x)
-#define BSR(r,v)               LTALLOC_BIT_SCAN_REVERSE(r, v)
-#define SPINLOCK_ACQUIRE(lock) LTALLOC_SPINLOCK_ACQUIRE(lock)
-#define SPINLOCK_RELEASE(lock) LTALLOC_SPINLOCK_RELEASE(lock)
-
-#ifdef __cplusplus
-#include <new>
-#define CPPCODE(code) code
-#else
-#define CPPCODE(code)
-#endif
-
-#include <string.h> //for memset
-
 typedef char CODE3264_check[sizeof(void*) == CODE3264(4, 8) ? 1 : -1];
 
 // LTALLOC_VMALLOC(size) allocates a size bytes of virtual memory. Returns 0 if allocation fails. The allocated memory is zeroed.
@@ -426,10 +410,10 @@ static void release_thread_cache(void*);
 static pthread_key_t pthread_key;
 static pthread_once_t init_once = PTHREAD_ONCE_INIT;
 static void init_pthread_key() { pthread_key_create(&pthread_key, release_thread_cache); }
-static thread_local int thread_initialized = 0;
+static LTALLOC_THREAD_LOCAL int thread_initialized = 0;
 static void init_pthread_destructor()//must be called only when some block placed into a thread cache's free list
 {
-	if (unlikely(!thread_initialized))
+	if (LTALLOC_UNLIKELY(!thread_initialized))
 	{
 		thread_initialized = 1;
 		if (pthread_once)
@@ -455,6 +439,24 @@ extern CPPCODE("C") const PIMAGE_TLS_CALLBACK p_thread_callback_ltalloc = on_tls
 
 // End of platform-specific stuff
 //////////////////////////////////////////////////////////////////////////
+
+#include <string.h> //for memset
+
+#define likely(x)              LTALLOC_LIKELY(x)
+#define unlikely(x)            LTALLOC_UNLIKELY(x)
+#define BSR(r,v)               LTALLOC_BIT_SCAN_REVERSE(r, v)
+#define SPINLOCK_ACQUIRE(lock) LTALLOC_SPINLOCK_ACQUIRE(lock)
+#define SPINLOCK_RELEASE(lock) LTALLOC_SPINLOCK_RELEASE(lock)
+
+#define CHUNK_SIZE                         LTALLOC_CHUNK_SIZE
+#define CACHE_LINE_SIZE                    LTALLOC_CACHE_LINE_SIZE
+#define MAX_NUM_OF_BLOCKS_IN_BATCH         LTALLOC_MAX_NUM_OF_BLOCKS_IN_BATCH
+static const unsigned int MAX_BATCH_SIZE = LTALLOC_MAX_BATCH_SIZE;
+static const unsigned int MAX_BLOCK_SIZE = LTALLOC_MAX_BLOCK_SIZE;
+
+#define MAX_BLOCK_SIZE (MAX_BLOCK_SIZE < CHUNK_SIZE - (CHUNK_SIZE >> (1 + LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)) ? \
+                        MAX_BLOCK_SIZE : CHUNK_SIZE - (CHUNK_SIZE >> (1 + LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)))
+#define NUMBER_OF_SIZE_CLASSES ((sizeof(void*)*8 + 1) << LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)
 
 // If LTALLOC_HAS_VMSIZE is not 1, fallback to storing allocation sizes in a ptrie.
 // Note: it's also possible to force the ptrie function to be declared without actually being used in the allocator, for testing pruposes.
@@ -596,28 +598,18 @@ static uintptr_t ptrie_remove(PTrie *ptrie, uintptr_t key)
 }
 #endif
 
-#define CHUNK_SIZE                         LTALLOC_CHUNK_SIZE
-#define CACHE_LINE_SIZE                    LTALLOC_CACHE_LINE_SIZE
-#define MAX_NUM_OF_BLOCKS_IN_BATCH         LTALLOC_MAX_NUM_OF_BLOCKS_IN_BATCH
-static const unsigned int MAX_BATCH_SIZE = LTALLOC_MAX_BATCH_SIZE;
-static const unsigned int MAX_BLOCK_SIZE = LTALLOC_MAX_BLOCK_SIZE;
-
-#define MAX_BLOCK_SIZE (MAX_BLOCK_SIZE < CHUNK_SIZE - (CHUNK_SIZE >> (1 + LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)) ? \
-                        MAX_BLOCK_SIZE : CHUNK_SIZE - (CHUNK_SIZE >> (1 + LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)))
-#define NUMBER_OF_SIZE_CLASSES ((sizeof(void*)*8 + 1) << LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)
-
 typedef struct FreeBlock
 {
 	struct FreeBlock *next,
 					 *nextBatch;//in the central cache blocks are organized into batches to allow fast moving blocks from thread cache and back
 } FreeBlock;
 
-typedef struct alignas(CACHE_LINE_SIZE) ChunkBase//force sizeof(Chunk) = cache line size to avoid false sharing
+typedef struct LTALLOC_ALIGNAS(CACHE_LINE_SIZE) ChunkBase//force sizeof(Chunk) = cache line size to avoid false sharing
 {
 	unsigned int sizeClass;
 } Chunk;
 
-typedef struct alignas(CACHE_LINE_SIZE) ChunkSm//chunk of smallest blocks of size = sizeof(void*)
+typedef struct LTALLOC_ALIGNAS(CACHE_LINE_SIZE) ChunkSm//chunk of smallest blocks of size = sizeof(void*)
 {
 	unsigned int sizeClass;//struct ChunkBase chunk;
 	struct ChunkSm *prev, *next;
@@ -626,7 +618,7 @@ typedef struct alignas(CACHE_LINE_SIZE) ChunkSm//chunk of smallest blocks of siz
 	FreeBlock *batches[NUM_OF_BATCHES_IN_CHUNK_SM];//batches of blocks inside ChunkSm have to be stored separately (as smallest blocks of size = sizeof(void*) do not have enough space to store second pointer for the batch)
 } ChunkSm;
 
-typedef struct alignas(CACHE_LINE_SIZE)//align needed to prevent cache line sharing between adjacent classes accessed from different threads
+typedef struct LTALLOC_ALIGNAS(CACHE_LINE_SIZE)//align needed to prevent cache line sharing between adjacent classes accessed from different threads
 {
 	LTALLOC_SPINLOCK_TYPE lock;
 	unsigned int freeBlocksInLastChunk;
@@ -647,7 +639,7 @@ typedef struct
 	FreeBlock *tempList;//intermediate list providing a hysteresis in order to avoid a corner case of too frequent moving free blocks to the central cache and back from
 	int counter;//number of blocks in freeList (used to determine when to move free blocks list to the central cache)
 } ThreadCache;
-static thread_local ThreadCache threadCache[NUMBER_OF_SIZE_CLASSES];// = {{0}};
+static LTALLOC_THREAD_LOCAL ThreadCache threadCache[NUMBER_OF_SIZE_CLASSES];// = {{0}};
 
 static struct
 {
@@ -926,7 +918,7 @@ static void add_batch_to_central_cache(CentralCache *cc, unsigned int sizeClass,
 	}
 }
 
-static NOINLINE void move_to_central_cache(ThreadCache *tc, unsigned int sizeClass)
+static LTALLOC_NOINLINE void move_to_central_cache(ThreadCache *tc, unsigned int sizeClass)
 {
 	init_pthread_destructor();//needed for cases when freed memory was allocated in the other thread and no alloc was called in this thread till its termination
 
