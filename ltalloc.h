@@ -11,6 +11,7 @@ void*  ltcalloc(size_t, size_t);
 void*  ltmemalign(size_t, size_t);
 void   ltsqueeze(size_t); /*return memory to system (see README.md)*/
 size_t ltmsize(void*);
+void   ltonthreadexit();
 #ifdef __cplusplus
 }
 #endif
