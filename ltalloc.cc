@@ -41,134 +41,450 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define LTALLOC_VERSION "1.0.0" // (2015/06/16) - standard STL allocator provided [see ltalloc.hpp file](ltalloc.hpp)
 #define LTALLOC_VERSION "0.0.0" // (2013/xx/xx) - fork from public repository */
 
-//Customizable constants
-//#define LTALLOC_DISABLE_OPERATOR_NEW_OVERRIDE
-//#define LTALLOC_AUTO_GC_INTERVAL 3.0
-#ifndef LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO
-#define LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO 2//determines how accurately size classes are spaced (i.e. when = 0, allocation requests are rounded up to the nearest power of two (2^n), when = 1, rounded to 2^n, or (2^n)*1.5, when = 2, rounded to 2^n, (2^n)*1.25, (2^n)*1.5, or (2^n)*1.75, and so on); this parameter have direct influence on memory fragmentation - bigger values lead to reducing internal fragmentation (which can be approximately estimated as pow(0.5, VALUE)*100%), but at the same time increasing external fragmentation
+// Optional user config file. Can be used to override the customizable constants and the platform specific macros.
+#ifdef LTALLOC_USER_CONFIG
+#include LTALLOC_USER_CONFIG
 #endif
-#define CHUNK_SIZE     (64*1024)//size of chunk (basic allocation unit for all allocations of size <= MAX_BLOCK_SIZE); must be a power of two (as well as all following parameters), also should not be less than allocation granularity on Windows (which is always 64K by design of NT kernel)
-#define CACHE_LINE_SIZE 64
-#define MAX_NUM_OF_BLOCKS_IN_BATCH 256//maximum number of blocks to move between a thread cache and a central cache in one shot
-static const unsigned int MAX_BATCH_SIZE = 64*1024;//maximum total size of blocks to move between a thread cache and a central cache in one shot (corresponds to half size of thread cache of each size class)
-static const unsigned int MAX_BLOCK_SIZE = CHUNK_SIZE;//requesting memory of any size greater than this value will lead to direct call of system virtual memory allocation routine
-
-//Platform-specific stuff
 
 #ifdef __cplusplus
-#define CPPCODE(code) code
 #include <new>
+#define CPPCODE(code) code
 #else
 #define CPPCODE(code)
 #endif
 
+//////////////////////////////////////////////////////////////////////////
+// Customizable constants
+
+// Define to disable the override of the new operator (enabled by default if compiling this file in c++).
+//#define LTALLOC_DISABLE_OPERATOR_NEW_OVERRIDE
+
+// Define to enable an automatic call to ltsqueeze approximately every X seconds (3.0 by default). The call is made
+// during ltrealloc.
 #ifdef LTALLOC_AUTO_GC_INTERVAL
-#include <time.h>
 #	if			LTALLOC_AUTO_GC_INTERVAL <= 0
 #		undef	LTALLOC_AUTO_GC_INTERVAL 
 #		define	LTALLOC_AUTO_GC_INTERVAL 3.00
 #	endif
 #endif
 
-#ifdef __GNUC__
-
-#define __STDC_LIMIT_MACROS
-#include <stdint.h> //for SIZE_MAX
-#include <limits.h> //for UINT_MAX
-#define alignas(a) __attribute__((aligned(a)))
-#define thread_local __thread
-#define NOINLINE __attribute__((noinline))
-#define CAS_LOCK(lock) __sync_lock_test_and_set(lock, 1)
-#define SPINLOCK_RELEASE(lock) __sync_lock_release(lock)
-#ifdef __sparc__
-#define PAUSE __asm__ __volatile__("rd    %%ccr, %%g0\n\t" ::: "memory")
-#elif defined(__ppc__)   || defined(_ARCH_PPC)  || \
-      defined(_ARCH_PWR) || defined(_ARCH_PWR2) || defined(_POWER)
-#define PAUSE __asm__ __volatile__("or 27,27,27")
-#elif defined(__ANDROID__)
-#include <sched.h> //for sched_yield
-#define PAUSE sched_yield()
-#else
-#define PAUSE __asm__ __volatile__("pause" ::: "memory")
-#endif
-#define BSR(r, v) r = CODE3264(__builtin_clz(v) ^ 31, __builtin_clzll(v) ^ 63)//x ^ 31 = 31 - x, but gcc does not optimize 31 - __builtin_clz(x) to bsr(x), but generates 31 - (bsr(x) ^ 31)
-
-#elif _MSC_VER
-
-#define _ALLOW_KEYWORD_MACROS
-#include <limits.h> //for SIZE_MAX and UINT_MAX
-#define alignas(a) __declspec(align(a))
-#define thread_local __declspec(thread)
-#define NOINLINE __declspec(noinline)
-#define CAS_LOCK(lock) _InterlockedExchange((long*)lock, 1)
-#define SPINLOCK_RELEASE(lock) _InterlockedExchange((long*)lock, 0)
-#define PAUSE _mm_pause()
-#define BSR(r, v) CODE3264(_BitScanReverse, _BitScanReverse64)((unsigned long*)&r, v)
-CPPCODE(extern "C") long _InterlockedExchange(long volatile *, long);
-CPPCODE(extern "C") void _mm_pause();
-#pragma warning(disable: 4127 4201 4324 4290)//"conditional expression is constant", "nonstandard extension used : nameless struct/union", and "structure was padded due to __declspec(align())"
-
-#else
-#error Unsupported compiler
+// Determines how accurately size classes are spaced (i.e. when = 0, allocation requests are rounded up to the nearest
+// power of two (2^n), when = 1, rounded to 2^n, or (2^n)*1.5, when = 2, rounded to 2^n, (2^n)*1.25, (2^n)*1.5, or
+// (2^n)*1.75, and so on); this parameter have direct influence on memory fragmentation - bigger values lead to reducing
+// internal fragmentation (which can be approximately estimated as pow(0.5, VALUE)*100%), but at the same time
+// increasing external fragmentation.
+#ifndef LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO
+#define LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO 2
 #endif
 
-#if __GNUC__ || __INTEL_COMPILER
-#define likely(x) __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
-#else
-#define likely(x) (x)
-#define unlikely(x) (x)
+// Size of chunk (basic allocation unit for all allocations of size <= MAX_BLOCK_SIZE); must be a power of two (as well
+// as all following parameters), also should not be less than allocation granularity on Windows (which is always 64K by
+// design of NT kernel).
+#ifndef LTALLOC_CHUNK_SIZE
+#define LTALLOC_CHUNK_SIZE (64 * 1024)
 #endif
 
-static void SPINLOCK_ACQUIRE(volatile int *lock) {if (CAS_LOCK(lock)) while (*lock || CAS_LOCK(lock)) PAUSE;}
+// Maximum number of blocks to move between a thread cache and a central cache in one shot.
+#ifndef LTALLOC_MAX_NUM_OF_BLOCKS_IN_BATCH
+#define LTALLOC_MAX_NUM_OF_BLOCKS_IN_BATCH 256
+#endif
 
+// Maximum total size of blocks to move between a thread cache and a central cache in one shot (corresponds to half size
+// of thread cache of each size class)
+#ifndef LTALLOC_MAX_BATCH_SIZE
+#define LTALLOC_MAX_BATCH_SIZE (64 * 1024)
+#endif
+
+// Requesting memory of any size greater than this value will lead to direct call of system virtual memory allocation
+// routine).
+#ifndef LTALLOC_MAX_BLOCK_SIZE
+#define LTALLOC_MAX_BLOCK_SIZE LTALLOC_CHUNK_SIZE
+#endif
+
+//////////////////////////////////////////////////////////////////////////
+// Platform-specific stuff
+
+// Assert macro.
+#ifndef LTALLOC_ASSERT
 #include <assert.h>
-#include <string.h> //for memset
-
-#if SIZE_MAX == UINT_MAX
-#define CODE3264(c32, c64) c32
-#else
-#define CODE3264(c32, c64) c64
+#define LTALLOC_ASSERT(cond) assert(cond)
 #endif
+
+// Size of a cache line.
+#ifndef LTALLOC_CACHE_LINE_SIZE
+#define LTALLOC_CACHE_LINE_SIZE 64
+#endif
+
+// Defined to 1 when compiling in 64 bits mode (.ie pointers are 64 bits).
+#ifndef LTALLOC_64BITS
+#ifdef __GNUC__
+#	define __STDC_LIMIT_MACROS
+#	include <stdint.h>
+#	define LTALLOC_64BITS (UINTPTR_MAX == UINT64_MAX)
+#elif _MSC_VER
+#	if defined(_WIN64)
+#		define LTALLOC_64BITS 1
+#	else
+#		define LTALLOC_64BITS 0
+#	endif
+#else
+#	error LTALLOC_64BITS not defined.
+#endif
+#endif
+
+// Allows to declare an aligned variable or struct. Equivalent to c++11 alignas keyword.
+#ifndef LTALLOC_ALIGNAS
+#ifdef __GNUC__
+#	define LTALLOC_ALIGNAS(a) __attribute__((aligned(a)))
+#elif _MSC_VER
+#	define LTALLOC_ALIGNAS(a) __declspec(align(a))
+#else
+#	error LTALLOC_ALIGNAS not implemented.
+#endif
+#endif
+
+// Allows to declare a thread local variable. Equivalent to c++11 thread_local keyworkd.
+#ifndef LTALLOC_THREAD_LOCAL
+#ifdef __GNUC__
+#	define LTALLOC_THREAD_LOCAL __thread
+#elif _MSC_VER
+#	define LTALLOC_THREAD_LOCAL __declspec(thread)
+#else
+#	error LTALLOC_THREAD_LOCAL not implemented.
+#endif
+#endif
+
+// Tells the compiler not to inline a function.
+#ifndef LTALLOC_NOINLINE
+#ifdef __GNUC__
+#	define LTALLOC_NOINLINE  __attribute__((noinline))
+#elif _MSC_VER
+#	define LTALLOC_NOINLINE __declspec(noinline)
+#else
+#	define LTALLOC_NOINLINE
+#endif
+#endif
+
+// Hints to tell the compiler if a condition is likely or unlikely to be true.
+#if defined(LTALLOC_LIKELY) || defined(LTALLOC_UNLIKELY)
+#if !defined(LTALLOC_LIKELY) || !defined(LTALLOC_UNLIKELY) || !defined(LTALLOC_SPINLOCK_RELEASE) 
+#	error LTALLOC_LIKELY and LTALLOC_UNLIKELY should either both be provided, or both left undefined.
+#endif
+#else
+#if __GNUC__ || __INTEL_COMPILER
+#	define LTALLOC_LIKELY(x) __builtin_expect(!!(x), 1)
+#	define LTALLOC_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#	define LTALLOC_LIKELY(x) (x)
+#	define LTALLOC_UNLIKELY(x) (x)
+#endif
+#endif
+
+// LTALLOC_SPINLOCK_TYPE is the type of a spinlock. LTALLOC_SPINLOCK_ACQUIRE(lockptr) is used to lock it,
+// LTALLOC_SPINLOCK_RELEASE(lockptr) to unlock it.
+#if defined(LTALLOC_SPINLOCK_TYPE) || defined(LTALLOC_SPINLOCK_ACQUIRE) || defined(LTALLOC_SPINLOCK_RELEASE) 
+#if !defined(LTALLOC_SPINLOCK_TYPE) || !defined(LTALLOC_SPINLOCK_ACQUIRE) || !defined(LTALLOC_SPINLOCK_RELEASE) 
+#	error LTALLOC_SPINLOCK_TYPE, LTALLOC_SPINLOCK_ACQUIRE and LTALLOC_SPINLOCK_RELEASE must either all be provided, or all left undefined.
+#endif
+#else
+
+#ifdef __GNUC__
+#	define CAS_LOCK(lock) __sync_lock_test_and_set(lock, 1)
+#	define LTALLOC_SPINLOCK_RELEASE(lock) __sync_lock_release(lock)
+#	ifdef __sparc__
+#		define PAUSE __asm__ __volatile__("rd    %%ccr, %%g0\n\t" ::: "memory")
+#	elif defined(__ppc__)  || defined(_ARCH_PPC) || defined(_ARCH_PWR) || defined(_ARCH_PWR2) || defined(_POWER)
+#		define PAUSE __asm__ __volatile__("or 27,27,27")
+#	elif defined(__ANDROID__)
+#		include <sched.h> //for sched_yield
+#		define PAUSE sched_yield()
+#	else
+#		define PAUSE __asm__ __volatile__("pause" ::: "memory")
+#	endif
+#elif _MSC_VER
+#	include <intrin.h>
+#	define CAS_LOCK(lock) _InterlockedExchange((long*)lock, 1)
+#	define LTALLOC_SPINLOCK_RELEASE(lock) _InterlockedExchange((long*)lock, 0)
+#	define PAUSE _mm_pause()
+#else
+#	error LTALLOC_SPINLOCK_* not implemented.
+#endif
+
+static void spinlock_acquire(volatile int *lock)
+{
+	if (CAS_LOCK(lock))
+		while (*lock || CAS_LOCK(lock))
+			PAUSE;
+}
+
+#define LTALLOC_SPINLOCK_TYPE volatile int
+#define LTALLOC_SPINLOCK_ACQUIRE(lock) spinlock_acquire(lock)
+#endif
+
+// Searches in reverse order (from most significant bit to least) for the firt bit set in v and writes its index into r.
+#ifndef LTALLOC_BIT_SCAN_REVERSE
+#ifdef __GNUC__
+#	define LTALLOC_BIT_SCAN_REVERSE(r, v) r = CODE3264(__builtin_clz(v) ^ 31, __builtin_clzll(v) ^ 63)//x ^ 31 = 31 - x, but gcc does not optimize 31 - __builtin_clz(x) to bsr(x), but generates 31 - (bsr(x) ^ 31)
+#elif _MSC_VER
+#	include <intrin.h>
+#	define LTALLOC_BIT_SCAN_REVERSE(r, v) CODE3264(_BitScanReverse, _BitScanReverse64)((unsigned long*)&r, v)
+#else
+#	error LTALLOC_BIT_SCAN_REVERSE must be implemented for ltalloc to work.
+#endif
+#endif
+
+#if LTALLOC_64BITS
+#define CODE3264(c32, c64) c64
+#else
+#define CODE3264(c32, c64) c32
+#endif
+
 typedef char CODE3264_check[sizeof(void*) == CODE3264(4, 8) ? 1 : -1];
 
+// LTALLOC_VMALLOC(size) allocates a size bytes of virtual memory. Returns 0 if allocation fails. The allocated memory is zeroed.
+// LTALLOC_VMFREE(p, size) frees a previously allocated virtual memory.
+// LTALLOC_VMALLOC_MIN_SIZE() returns the minimum size allocatable by LTALLOC_VMALLOC.
+#if defined(LTALLOC_VMALLOC) || defined(LTALLOC_VMFREE) || defined(LTALLOC_VMALLOC_MIN_SIZE)
+#if !defined(LTALLOC_VMALLOC) || !defined(LTALLOC_VMFREE) || !defined(LTALLOC_VMALLOC_MIN_SIZE)
+#	error LTALLOC_VMALLOC, LTALLOC_VMFREE and LTALLOC_VMALLOC_MIN_SIZE must either all be provided, or all left undefined.
+#endif
+
+#else
+
 #ifdef _WIN32
+
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-#define VMALLOC(size) VirtualAlloc(NULL, size, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE)
-#define VMFREE(p, size) VirtualFree(p, 0, MEM_RELEASE)
+static size_t get_alloc_granularity()
+{
+	static DWORD allocationGranularity = 0;
+	if (!allocationGranularity) {
+		SYSTEM_INFO si;
+		GetSystemInfo(&si);
+		allocationGranularity = si.dwAllocationGranularity;
+	}
+	return allocationGranularity;
+}
+
+#define LTALLOC_VMALLOC(size) VirtualAlloc(NULL, size, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE)
+#define LTALLOC_VMFREE(p, size) VirtualFree(p, 0, MEM_RELEASE)
+#define LTALLOC_VMALLOC_MIN_SIZE() get_alloc_granularity()
 
 #else
 
+#ifndef LTALLOC_HAS_VMSIZE
+#define LTALLOC_HAS_VMSIZE 0
+#endif
+
 #include <sys/mman.h>
 #include <unistd.h>
-
-#define VMALLOC(size) (void*)(((uintptr_t)mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE, -1, 0)+1)&~1)//with the conversion of MAP_FAILED to 0
-#define VMFREE(p, size) munmap(p, size)
 
 #include "ltalloc.h"
 
 static size_t page_size()
 {
-	assert((uintptr_t)MAP_FAILED+1 == 0);//have to use dynamic check somewhere, because some gcc versions (e.g. 4.4.5) won't compile typedef char MAP_FAILED_value_static_check[(uintptr_t)MAP_FAILED+1 == 0 ? 1 : -1];
+	LTALLOC_ASSERT((uintptr_t)MAP_FAILED+1 == 0);//have to use dynamic check somewhere, because some gcc versions (e.g. 4.4.5) won't compile typedef char MAP_FAILED_value_static_check[(uintptr_t)MAP_FAILED+1 == 0 ? 1 : -1];
 	static size_t pagesize = 0;
 	if (!pagesize) pagesize = sysconf(_SC_PAGE_SIZE);//assuming that writing of size_t value is atomic, so this can be done safely in different simultaneously running threads
 	return pagesize;
 }
 
+#define LTALLOC_VMALLOC(size) (void*)(((uintptr_t)mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE, -1, 0)+1)&~1)//with the conversion of MAP_FAILED to 0
+#define LTALLOC_VMFREE(p, size) munmap(p, size)
+#define LTALLOC_VMALLOC_MIN_SIZE() page_size()
+
+#endif
+
+#endif
+
+// LTALLOC_VMSIZE(p) [OPTIONAL] returns the size of the corresponding virtual memory allocation. Define LTALLOC_HAS_VMSIZE to 0 if unavailable.
+#ifdef LTALLOC_HAS_VMSIZE
+#if LTALLOC_HAS_VMSIZE && !defined(LTALLOC_VMSIZE)
+#	error If LTALLOC_HAS_VMSIZE is defined to 1, an implementation of LTALLOC_VMSIZE must be provided.
+#endif
+#if LTALLOC_HAS_VMSIZE == 0
+#	undef LTALLOC_VMSIZE
+#endif
+#else
+
+#ifdef _WIN32
+#define LTALLOC_HAS_VMSIZE 1
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+static size_t get_alloc_size(void *p)
+{
+	MEMORY_BASIC_INFORMATION mi;
+	VirtualQuery(p, &mi, sizeof(mi));
+	return mi.RegionSize;
+}
+
+#define LTALLOC_VMSIZE(p) get_alloc_size(p)
+
+#else
+#define LTALLOC_HAS_VMSIZE 0
+#endif
+#endif
+
+// LTALLOC_VMALLOC_ALIGNED(alignment, size) [OPTIONAL] allocates virtual memory with a certain alignment.
+// If this macro is not defined, ltalloc implements a fallback involving calling VMALLOC potentially several times.
+// If the target platform has an API for aligned virtual memory allocation, it may be more efficient to implemnt this macro with it.
+#ifndef LTALLOC_VMALLOC_ALIGNED
+
+#ifdef _WIN32
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+static void *sys_aligned_alloc(size_t alignment, size_t size)
+{
+	void *p = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);//optimistically try mapping precisely the right amount before falling back to the slow method
+	LTALLOC_ASSERT(!(alignment & (alignment - 1)) && "alignment must be a power of two");
+	if ((uintptr_t)p & (alignment - 1)/* && p != MAP_FAILED*/)
+	{
+		VirtualFree(p, 0, MEM_RELEASE);
+		static DWORD allocationGranularity = 0;
+		if (!allocationGranularity) {
+			SYSTEM_INFO si;
+			GetSystemInfo(&si);
+			allocationGranularity = si.dwAllocationGranularity;
+		}
+		if ((uintptr_t)p < 16 * 1024 * 1024)//fill "bubbles" (reserve unaligned regions) at the beginning of virtual address space, otherwise there will be always falling back to the slow method
+			VirtualAlloc(p, alignment - ((uintptr_t)p & (alignment - 1)), MEM_RESERVE, PAGE_NOACCESS);
+		do
+		{
+			p = VirtualAlloc(NULL, size + alignment - allocationGranularity, MEM_RESERVE, PAGE_NOACCESS);
+			if (p == NULL) return NULL;
+			VirtualFree(p, 0, MEM_RELEASE);//unfortunately, WinAPI doesn't support release a part of allocated region, so release a whole region
+			p = VirtualAlloc((void*)(((uintptr_t)p + (alignment - 1)) & ~(alignment - 1)), size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+		} while (p == NULL);
+	}
+	return p;
+}
+
+#else
+
+static void *sys_aligned_alloc(size_t alignment, size_t size)
+{
+	void *p = LTALLOC_VMALLOC(size);//optimistically try mapping precisely the right amount before falling back to the slow method
+	LTALLOC_ASSERT(!(alignment & (alignment - 1)) && "alignment must be a power of two");
+	if ((uintptr_t)p & (alignment - 1))
+	{
+		LTALLOC_VMFREE(p, size);
+		p = LTALLOC_VMALLOC(size + alignment - LTALLOC_VMALLOC_MIN_SIZE());
+		if (p)
+		{
+			uintptr_t ap = ((uintptr_t)p + (alignment - 1)) & ~(alignment - 1);
+			uintptr_t diff = ap - (uintptr_t)p;
+			if (diff) LTALLOC_VMFREE(p, diff);
+			diff = alignment - LTALLOC_VMALLOC_MIN_SIZE() - diff;
+			LTALLOC_ASSERT((intptr_t)diff >= 0);
+			if (diff) LTALLOC_VMFREE((void*)(ap + size), diff);
+			return (void*)ap;
+		}
+	}
+	
+	return p;
+}
+#endif
+
+#define LTALLOC_VMALLOC_ALIGNED(alignment, size) sys_aligned_alloc(alignment, size)
+#endif
+
+// Define to 1 to enable an automatic call to release_thread_cache() when a thread exits. This function must be called
+// to make sure no memory is leaked when a thread exits. If not supported by the current platform, it will cause a
+// compilation error. In this case, define to 0 and call ltonthreadexit() manually before a thread exits.
+#ifndef LTALLOC_AUTO_RELEASE_THREAD_CACHE
+#define LTALLOC_AUTO_RELEASE_THREAD_CACHE 1
+#endif
+
+#if LTALLOC_AUTO_RELEASE_THREAD_CACHE
+static void release_thread_cache(void*);
+#ifdef __GNUC__
+#include <pthread.h>
+#pragma weak pthread_once
+#pragma weak pthread_key_create
+#pragma weak pthread_setspecific
+static pthread_key_t pthread_key;
+static pthread_once_t init_once = PTHREAD_ONCE_INIT;
+static void init_pthread_key() { pthread_key_create(&pthread_key, release_thread_cache); }
+static LTALLOC_THREAD_LOCAL int thread_initialized = 0;
+static void init_pthread_destructor()//must be called only when some block placed into a thread cache's free list
+{
+	if (LTALLOC_UNLIKELY(!thread_initialized))
+	{
+		thread_initialized = 1;
+		if (pthread_once)
+		{
+			pthread_once(&init_once, init_pthread_key);
+			pthread_setspecific(pthread_key, (void*)1);//set nonzero value to force calling of release_thread_cache() on thread terminate
+		}
+	}
+}
+#elif defined(_WIN32)
+static void NTAPI on_tls_callback(PVOID h, DWORD reason, PVOID pv) { h; pv; if (reason == DLL_THREAD_DETACH) release_thread_cache(0); }
+#pragma comment(linker, "/INCLUDE:" CODE3264("_","") "p_thread_callback_ltalloc")
+#pragma const_seg(".CRT$XLL")
+extern CPPCODE("C") const PIMAGE_TLS_CALLBACK p_thread_callback_ltalloc = on_tls_callback;
+#pragma const_seg()
+#define init_pthread_destructor()
+#else
+#error No automatic solution is implemented for this platform, you have to call ltonthreadexit() manually when a thread exits.
+#endif
+#else
+#define init_pthread_destructor()
+#endif
+
+// End of platform-specific stuff
+//////////////////////////////////////////////////////////////////////////
+
+#include <string.h> //for memset
+
+#define likely(x)              LTALLOC_LIKELY(x)
+#define unlikely(x)            LTALLOC_UNLIKELY(x)
+#define BSR(r,v)               LTALLOC_BIT_SCAN_REVERSE(r, v)
+#define SPINLOCK_ACQUIRE(lock) LTALLOC_SPINLOCK_ACQUIRE(lock)
+#define SPINLOCK_RELEASE(lock) LTALLOC_SPINLOCK_RELEASE(lock)
+
+#define CHUNK_SIZE                         LTALLOC_CHUNK_SIZE
+#define CACHE_LINE_SIZE                    LTALLOC_CACHE_LINE_SIZE
+#define MAX_NUM_OF_BLOCKS_IN_BATCH         LTALLOC_MAX_NUM_OF_BLOCKS_IN_BATCH
+static const unsigned int MAX_BATCH_SIZE = LTALLOC_MAX_BATCH_SIZE;
+static const unsigned int MAX_BLOCK_SIZE = LTALLOC_MAX_BLOCK_SIZE;
+
+#define MAX_BLOCK_SIZE (MAX_BLOCK_SIZE < CHUNK_SIZE - (CHUNK_SIZE >> (1 + LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)) ? \
+                        MAX_BLOCK_SIZE : CHUNK_SIZE - (CHUNK_SIZE >> (1 + LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)))
+#define NUMBER_OF_SIZE_CLASSES ((sizeof(void*)*8 + 1) << LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)
+
+// If LTALLOC_HAS_VMSIZE is not 1, fallback to storing allocation sizes in a ptrie.
+// Note: it's also possible to force the ptrie function to be declared without actually being used in the allocator, for testing pruposes.
+#ifndef LTALLOC_DECLARE_PTRIE
+#define LTALLOC_DECLARE_PTRIE (LTALLOC_HAS_VMSIZE == 0)
+#endif
+
+#if LTALLOC_DECLARE_PTRIE
 typedef struct PTrieNode            // Compressed radix tree (patricia trie) for storing sizes of system allocations
 {                                   // This implementation have some specific properties:
-    uintptr_t keys[2];              // 1. There are no separate leaf nodes (with both null children), as leaf's value is stored directly in place of corresponding child node pointer. Least significant bit of that pointer used to determine its meaning (i.e., is it a value, or child node pointer).
-    struct PTrieNode *childNodes[2];// 2. Inserting a new element (key/value) into this tree require to create always an exactly one new node (and similarly for remove key/node operation).
+	uintptr_t keys[2];              // 1. There are no separate leaf nodes (with both null children), as leaf's value is stored directly in place of corresponding child node pointer. Least significant bit of that pointer used to determine its meaning (i.e., is it a value, or child node pointer).
+	struct PTrieNode *childNodes[2];// 2. Inserting a new element (key/value) into this tree require to create always an exactly one new node (and similarly for remove key/node operation).
 } PTrieNode;                        // 3. Tree always contains just one node with null child (i.e. all but one nodes in any possible tree are always have two children).
 #define PTRIE_NULL_NODE (PTrieNode*)(uintptr_t)1
-static PTrieNode *ptrieRoot = PTRIE_NULL_NODE, *ptrieFreeNodesList = NULL, *ptrieNewAllocatedPage = NULL;
-static volatile int ptrieLock = 0;
-
-static uintptr_t ptrie_lookup(uintptr_t key)
+typedef struct PTrie
 {
-	PTrieNode *node = ptrieRoot;
+	PTrieNode *root;
+	PTrieNode *freeNodesList;
+	PTrieNode *newAllocatedPage;
+	LTALLOC_SPINLOCK_TYPE lock;
+} PTrie;
+
+PTrie largeAllocSizes = { PTRIE_NULL_NODE, NULL, NULL };
+
+static uintptr_t ptrie_lookup(PTrie *ptrie, uintptr_t key)
+{
+	SPINLOCK_ACQUIRE(&ptrie->lock);
+	PTrieNode *node = ptrie->root;
 	uintptr_t *lastKey = NULL;
 	while (!((uintptr_t)node & 1))
 	{
@@ -176,16 +492,40 @@ static uintptr_t ptrie_lookup(uintptr_t key)
 		lastKey = &node->keys[branch];
 		node = node->childNodes[branch];
 	}
-	assert(lastKey && (*lastKey & ~0xFF) == key);
+	LTALLOC_ASSERT(lastKey && (*lastKey & ~0xFF) == key);
+	SPINLOCK_RELEASE(&ptrie->lock);
 	return (uintptr_t)node & ~1;
 }
 
-static void ptrie_insert(uintptr_t key, uintptr_t value, PTrieNode *newNode/* = (PTrieNode*)malloc(sizeof(PTrieNode))*/)
+static bool ptrie_insert(PTrie *ptrie, uintptr_t key, uintptr_t value)
 {
-	PTrieNode **node = &ptrieRoot, *n;
+	SPINLOCK_ACQUIRE(&ptrie->lock);
+	// First get a new node.
+	// The nodes are stored in memory pages allocated for that single purpose. Free nodes are arranged in a free list
+	// (the first bytes in the node points to the next free page). The last bytes of the page are used to point to the
+	// next free page, in case several pages where allocated at the same time by different threads.
+	PTrieNode* newNode;
+	if (ptrie->freeNodesList)
+		ptrie->freeNodesList = *(PTrieNode**)(newNode = ptrie->freeNodesList);
+	else if (ptrie->newAllocatedPage) {
+		newNode = ptrie->newAllocatedPage;
+		if (!((uintptr_t)++ptrie->newAllocatedPage & (LTALLOC_VMALLOC_MIN_SIZE() - 1)))
+			ptrie->newAllocatedPage = ((PTrieNode**)ptrie->newAllocatedPage)[-1];
+	}
+	else {
+		SPINLOCK_RELEASE(&ptrie->lock);
+		newNode = (PTrieNode*)LTALLOC_VMALLOC(LTALLOC_VMALLOC_MIN_SIZE());
+		if (unlikely(!newNode)) { return false; }
+		LTALLOC_ASSERT(((char**)((char*)newNode + LTALLOC_VMALLOC_MIN_SIZE()))[-1] == 0);
+		SPINLOCK_ACQUIRE(&ptrie->lock);
+		((PTrieNode**)((char*)newNode + LTALLOC_VMALLOC_MIN_SIZE()))[-1] = ptrie->newAllocatedPage;//in case if other thread also have just allocated a new page
+		ptrie->newAllocatedPage = newNode + 1;
+	}
+	// Then, insert it.
+	PTrieNode **node = &ptrie->root, *n;
 	uintptr_t *prevKey = NULL, x, pkey;
 	unsigned int index, b;
-	assert(!((value & 1) | (key & 0xFF)));//check constraints for key/value
+	LTALLOC_ASSERT(!((value & 1) | (key & 0xFF)));//check constraints for key/value
 	for (;;)
 	{
 		n = *node;
@@ -207,11 +547,12 @@ static void ptrie_insert(uintptr_t key, uintptr_t value, PTrieNode *newNode/* = 
 				newNode->keys[0] = key;//left prefixEnd = 0, so all following insertions will be before this node
 				newNode->childNodes[0] = (PTrieNode*)(value | 1);
 				newNode->childNodes[1] = PTRIE_NULL_NODE;
-				return;
+				SPINLOCK_RELEASE(&ptrie->lock);
+				return true;
 			} else {
 				pkey = *prevKey & ~0xFF;
 				x = key ^ pkey;
-				assert(x/*key != pkey*/ && "key already inserted");
+				LTALLOC_ASSERT(x/*key != pkey*/ && "key already inserted");
 				break;
 			}
 		}
@@ -224,13 +565,15 @@ static void ptrie_insert(uintptr_t key, uintptr_t value, PTrieNode *newNode/* = 
 	newNode->childNodes[b] = (PTrieNode*)(value | 1);
 	newNode->childNodes[b^1] = n;
 	*node = newNode;
+	SPINLOCK_RELEASE(&ptrie->lock);
+	return true;
 }
 
-static uintptr_t ptrie_remove(uintptr_t key)
+static uintptr_t ptrie_remove(PTrie *ptrie, uintptr_t key)
 {
-	PTrieNode **node = &ptrieRoot;
+	PTrieNode **node = &ptrie->root;
 	uintptr_t *pkey = NULL;
-	assert(ptrieRoot != PTRIE_NULL_NODE && "trie is empty!");
+	LTALLOC_ASSERT(ptrie->root != PTRIE_NULL_NODE && "trie is empty!");
 	for (;;)
 	{
 		PTrieNode *n = *node;
@@ -239,13 +582,14 @@ static uintptr_t ptrie_remove(uintptr_t key)
 		if ((uintptr_t)cn & 1)//leaf
 		{
 			PTrieNode *other = n->childNodes[branch^1];
-			assert((n->keys[branch] & ~0xFF) == key);
-			assert(cn != PTRIE_NULL_NODE && "node's key is probably broken");
+			LTALLOC_ASSERT((n->keys[branch] & ~0xFF) == key);
+			LTALLOC_ASSERT(cn != PTRIE_NULL_NODE && "node's key is probably broken");
 		//	if (other == PTRIE_NULL_NODE) *node = PTRIE_NULL_NODE; else//special handling for null child nodes is not necessary
 			if (((uintptr_t)other & 1) && other != PTRIE_NULL_NODE)//if other node is not a pointer
 				*pkey = (n->keys[branch^1] & ~0xFF) | ((*pkey) & 0xFF);
 			*node = other;
-			*(PTrieNode**)n = ptrieFreeNodesList; ptrieFreeNodesList = n;//free(n);
+			*(PTrieNode**)n = ptrie->freeNodesList; ptrie->freeNodesList = n;//free(n);
+			SPINLOCK_RELEASE(&ptrie->lock);
 			return (uintptr_t)cn & ~1;
 		}
 		pkey = &n->keys[branch];
@@ -254,110 +598,18 @@ static uintptr_t ptrie_remove(uintptr_t key)
 }
 #endif
 
-static void *sys_aligned_alloc(size_t alignment, size_t size)
-{
-	void *p = VMALLOC(size);//optimistically try mapping precisely the right amount before falling back to the slow method
-	assert(!(alignment & (alignment-1)) && "alignment must be a power of two");
-	if ((uintptr_t)p & (alignment-1)/* && p != MAP_FAILED*/)
-	{
-		VMFREE(p, size);
-#ifdef _WIN32
-		{static DWORD allocationGranularity = 0;
-		if (!allocationGranularity) {
-			SYSTEM_INFO si;
-			GetSystemInfo(&si);
-			allocationGranularity = si.dwAllocationGranularity;
-		}
-		if ((uintptr_t)p < 16*1024*1024)//fill "bubbles" (reserve unaligned regions) at the beginning of virtual address space, otherwise there will be always falling back to the slow method
-			VirtualAlloc(p, alignment - ((uintptr_t)p & (alignment-1)), MEM_RESERVE, PAGE_NOACCESS);
-		do
-		{
-			p = VirtualAlloc(NULL, size + alignment - allocationGranularity, MEM_RESERVE, PAGE_NOACCESS);
-			if (p == NULL) return NULL;
-			VirtualFree(p, 0, MEM_RELEASE);//unfortunately, WinAPI doesn't support release a part of allocated region, so release a whole region
-			p = VirtualAlloc((void*)(((uintptr_t)p + (alignment-1)) & ~(alignment-1)), size, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
-		} while (p == NULL);}
-#else
-		p = VMALLOC(size + alignment - page_size());
-		if (p/* != MAP_FAILED*/)
-		{
-			uintptr_t ap = ((uintptr_t)p + (alignment-1)) & ~(alignment-1);
-			uintptr_t diff = ap - (uintptr_t)p;
-			if (diff) VMFREE(p, diff);
-			diff = alignment - page_size() - diff;
-			assert((intptr_t)diff >= 0);
-			if (diff) VMFREE((void*)(ap + size), diff);
-			return (void*)ap;
-		}
-#endif
-	}
-	//if (p == 0) p = sys_aligned_alloc(alignment, size);//just in case (because 0 pointer is handled specially elsewhere)
-	//if (p == MAP_FAILED) p = NULL;
-	return p;
-}
-
-static NOINLINE void sys_free(void *p)
-{
-	if (p == NULL) return;
-#ifdef _WIN32
-	VirtualFree(p, 0, MEM_RELEASE);
-#else
-	SPINLOCK_ACQUIRE(&ptrieLock);
-	size_t size = ptrie_remove((uintptr_t)p);
-	SPINLOCK_RELEASE(&ptrieLock);
-	munmap(p, size);
-#endif
-}
-
-static void release_thread_cache(void*);
-#ifdef __GNUC__
-#include <pthread.h>
-#pragma weak pthread_once
-#pragma weak pthread_key_create
-#pragma weak pthread_setspecific
-static pthread_key_t pthread_key;
-static pthread_once_t init_once = PTHREAD_ONCE_INIT;
-static void init_pthread_key() { pthread_key_create(&pthread_key, release_thread_cache); }
-static thread_local int thread_initialized = 0;
-static void init_pthread_destructor()//must be called only when some block placed into a thread cache's free list
-{
-	if (unlikely(!thread_initialized))
-	{
-		thread_initialized = 1;
-		if (pthread_once)
-		{
-			pthread_once(&init_once, init_pthread_key);
-			pthread_setspecific(pthread_key, (void*)1);//set nonzero value to force calling of release_thread_cache() on thread terminate
-		}
-	}
-}
-#else
-static void NTAPI on_tls_callback(PVOID h, DWORD reason, PVOID pv) { h; pv; if (reason == DLL_THREAD_DETACH) release_thread_cache(0); }
-#pragma comment(linker, "/INCLUDE:" CODE3264("_","") "p_thread_callback_ltalloc")
-#pragma const_seg(".CRT$XLL")
-extern CPPCODE("C") const PIMAGE_TLS_CALLBACK p_thread_callback_ltalloc = on_tls_callback;
-#pragma const_seg()
-#define init_pthread_destructor()
-#endif
-
-//End of platform-specific stuff
-
-#define MAX_BLOCK_SIZE (MAX_BLOCK_SIZE < CHUNK_SIZE - (CHUNK_SIZE >> (1 + LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)) ? \
-                        MAX_BLOCK_SIZE : CHUNK_SIZE - (CHUNK_SIZE >> (1 + LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)))
-#define NUMBER_OF_SIZE_CLASSES ((sizeof(void*)*8 + 1) << LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)
-
 typedef struct FreeBlock
 {
 	struct FreeBlock *next,
 					 *nextBatch;//in the central cache blocks are organized into batches to allow fast moving blocks from thread cache and back
 } FreeBlock;
 
-typedef struct alignas(CACHE_LINE_SIZE) ChunkBase//force sizeof(Chunk) = cache line size to avoid false sharing
+typedef struct LTALLOC_ALIGNAS(CACHE_LINE_SIZE) ChunkBase//force sizeof(Chunk) = cache line size to avoid false sharing
 {
 	unsigned int sizeClass;
 } Chunk;
 
-typedef struct alignas(CACHE_LINE_SIZE) ChunkSm//chunk of smallest blocks of size = sizeof(void*)
+typedef struct LTALLOC_ALIGNAS(CACHE_LINE_SIZE) ChunkSm//chunk of smallest blocks of size = sizeof(void*)
 {
 	unsigned int sizeClass;//struct ChunkBase chunk;
 	struct ChunkSm *prev, *next;
@@ -366,9 +618,9 @@ typedef struct alignas(CACHE_LINE_SIZE) ChunkSm//chunk of smallest blocks of siz
 	FreeBlock *batches[NUM_OF_BATCHES_IN_CHUNK_SM];//batches of blocks inside ChunkSm have to be stored separately (as smallest blocks of size = sizeof(void*) do not have enough space to store second pointer for the batch)
 } ChunkSm;
 
-typedef struct alignas(CACHE_LINE_SIZE)//align needed to prevent cache line sharing between adjacent classes accessed from different threads
+typedef struct LTALLOC_ALIGNAS(CACHE_LINE_SIZE)//align needed to prevent cache line sharing between adjacent classes accessed from different threads
 {
-	volatile int lock;
+	LTALLOC_SPINLOCK_TYPE lock;
 	unsigned int freeBlocksInLastChunk;
 	char *lastChunk;//Chunk or ChunkSm
 	union {
@@ -387,11 +639,11 @@ typedef struct
 	FreeBlock *tempList;//intermediate list providing a hysteresis in order to avoid a corner case of too frequent moving free blocks to the central cache and back from
 	int counter;//number of blocks in freeList (used to determine when to move free blocks list to the central cache)
 } ThreadCache;
-static thread_local ThreadCache threadCache[NUMBER_OF_SIZE_CLASSES];// = {{0}};
+static LTALLOC_THREAD_LOCAL ThreadCache threadCache[NUMBER_OF_SIZE_CLASSES];// = {{0}};
 
 static struct
 {
-	volatile int lock;
+	LTALLOC_SPINLOCK_TYPE lock;
 	void *freeChunk;
 	size_t size;
 } pad = {0, NULL, 0};
@@ -453,14 +705,14 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 		FreeBlock *fb = tc->tempList;
 		if (fb)
 		{
-			assert(tc->counter == (int)batch_size(sizeClass)+1);
+			LTALLOC_ASSERT(tc->counter == (int)batch_size(sizeClass)+1);
 			tc->counter = 1;
 			tc->freeList = fb->next;
 			tc->tempList = NULL;
 			return fb;
 		}
 
-		assert(tc->counter == 0 || tc->counter == (int)batch_size(sizeClass)+1);
+		LTALLOC_ASSERT(tc->counter == 0 || tc->counter == (int)batch_size(sizeClass)+1);
 		tc->counter = 1;
 
 		{CentralCache *cc = &centralCache[sizeClass];
@@ -471,7 +723,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 
 			if (cc->freeList)
 			{
-				assert(cc->freeListSize);
+				LTALLOC_ASSERT(cc->freeListSize);
 				if (likely(cc->freeListSize <= batchSize + 1))
 				{
 					tc->counter = batchSize - cc->freeListSize + 1;
@@ -499,7 +751,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 			if (cc->freeBlocksInLastChunk)
 			{
 				char *firstFree = cc->lastChunk;
-				assert(cc->lastChunk && cc->freeBlocksInLastChunk == (CHUNK_SIZE - ((uintptr_t)cc->lastChunk & (CHUNK_SIZE-1)))/blockSize);
+				LTALLOC_ASSERT(cc->lastChunk && cc->freeBlocksInLastChunk == (CHUNK_SIZE - ((uintptr_t)cc->lastChunk & (CHUNK_SIZE-1)))/blockSize);
 				if (cc->freeBlocksInLastChunk < batchSize) {
 					tc->counter = batchSize - cc->freeBlocksInLastChunk + 1;
 					batchSize = cc->freeBlocksInLastChunk;
@@ -507,7 +759,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 				cc->freeBlocksInLastChunk -= batchSize;
 				cc->lastChunk += blockSize * batchSize;
 				if (cc->freeBlocksInLastChunk == 0) {
-					assert(((uintptr_t)cc->lastChunk & (CHUNK_SIZE-1)) == 0);
+					LTALLOC_ASSERT(((uintptr_t)cc->lastChunk & (CHUNK_SIZE-1)) == 0);
 					cc->lastChunk = ((char**)cc->lastChunk)[-1];
 					if (cc->lastChunk)
 						cc->freeBlocksInLastChunk = (CHUNK_SIZE - ((uintptr_t)cc->lastChunk & (CHUNK_SIZE-1)))/blockSize;
@@ -535,7 +787,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 				((char**)((char*)p + CHUNK_SIZE))[-1] = 0;
 			} else {
 				SPINLOCK_RELEASE(&pad.lock);
-				p = sys_aligned_alloc(CHUNK_SIZE, CHUNK_SIZE);
+				p = LTALLOC_VMALLOC_ALIGNED(CHUNK_SIZE, CHUNK_SIZE);
 				if (unlikely(!p)) { CPPCODE(if (throw_) throw std::bad_alloc(); else) return NULL; }
 			}
 
@@ -545,7 +797,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 			//intptr_t sz = ((CHUNK_SIZE - numBlocksInChunk*blockSize) & ~(page_size()-1)) - page_size();
 			//if (sz > 0) mprotect((char*)p + page_size(), sz, PROT_NONE);//munmap((char*)p + page_size(), sz);//to make possible unmapping, we need to be more careful when returning memory to the system, not simply VMFREE(firstFreeChunk, CHUNK_SIZE), so let there be just mprotect
 #endif
-			assert(((char**)((char*)p + CHUNK_SIZE))[-1] == 0);//assume that allocated memory is always zero filled (on first access); it is better not to zero it explicitly because it will lead to allocation of physical page which may never needed otherwise
+			LTALLOC_ASSERT(((char**)((char*)p + CHUNK_SIZE))[-1] == 0);//assume that allocated memory is always zero filled (on first access); it is better not to zero it explicitly because it will lead to allocation of physical page which may never needed otherwise
 			if (numBlocksInChunk < batchSize) {
 				tc->counter = batchSize - numBlocksInChunk + 1;
 				batchSize = numBlocksInChunk;
@@ -601,7 +853,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 				{
 					if (unlikely(cs->prev == NULL)) goto no_free_batch;
 					cs = cc->chunkWithFreeBatches = cs->prev;
-					assert(cs->numBatches == NUM_OF_BATCHES_IN_CHUNK_SM);
+					LTALLOC_ASSERT(cs->numBatches == NUM_OF_BATCHES_IN_CHUNK_SM);
 				}
 				fb = cs->batches[--cs->numBatches];
 			}
@@ -616,28 +868,14 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 		if (unlikely(size == 0)) return ltmalloc CPPCODE(<throw_>)(1);//return NULL;//doing this check here is better than on the top level
 
 		size = (size + CHUNK_SIZE-1) & ~(CHUNK_SIZE-1);
-		p = sys_aligned_alloc(CHUNK_SIZE, size);
-#ifndef _WIN32
+		p = LTALLOC_VMALLOC_ALIGNED(CHUNK_SIZE, size);
+#if LTALLOC_HAS_VMSIZE == 0
 		if (p) {
-			SPINLOCK_ACQUIRE(&ptrieLock);
-			PTrieNode *newNode;
-			if (ptrieFreeNodesList)
-				ptrieFreeNodesList = *(PTrieNode**)(newNode = ptrieFreeNodesList);
-			else if (ptrieNewAllocatedPage) {
-				newNode = ptrieNewAllocatedPage;
-				if (!((uintptr_t)++ptrieNewAllocatedPage & (page_size()-1)))
-					ptrieNewAllocatedPage = ((PTrieNode**)ptrieNewAllocatedPage)[-1];
-			} else {
-				SPINLOCK_RELEASE(&ptrieLock);
-				newNode = (PTrieNode*)VMALLOC(page_size());
-				if (unlikely(!newNode)) { CPPCODE(if (throw_) throw std::bad_alloc(); else) return NULL; }
-				assert(((char**)((char*)newNode + page_size()))[-1] == 0);
-				SPINLOCK_ACQUIRE(&ptrieLock);
-				((PTrieNode**)((char*)newNode + page_size()))[-1] = ptrieNewAllocatedPage;//in case if other thread also have just allocated a new page
-				ptrieNewAllocatedPage = newNode + 1;
+			if (unlikely(!ptrie_insert(&largeAllocSizes, (uintptr_t)p, size)))
+			{
+				LTALLOC_VMFREE(p, size);
+				p = NULL;
 			}
-			ptrie_insert((uintptr_t)p, size, newNode);
-			SPINLOCK_RELEASE(&ptrieLock);
 		}
 #endif
 		CPPCODE(if (throw_) if (unlikely(!p)) throw std::bad_alloc();)
@@ -674,13 +912,13 @@ static void add_batch_to_central_cache(CentralCache *cc, unsigned int sizeClass,
 		if (unlikely(cs->numBatches == NUM_OF_BATCHES_IN_CHUNK_SM))
 		{
 			cs = cc->chunkWithFreeBatches = cc->chunkWithFreeBatches->next;
-			assert(cs && cs->numBatches == 0);
+			LTALLOC_ASSERT(cs && cs->numBatches == 0);
 		}
 		cs->batches[cs->numBatches++] = batch;
 	}
 }
 
-static NOINLINE void move_to_central_cache(ThreadCache *tc, unsigned int sizeClass)
+static LTALLOC_NOINLINE void move_to_central_cache(ThreadCache *tc, unsigned int sizeClass)
 {
 	init_pthread_destructor();//needed for cases when freed memory was allocated in the other thread and no alloc was called in this thread till its termination
 
@@ -716,7 +954,17 @@ CPPCODE(extern "C") void ltfree(void *p)
 		tc->freeList = (FreeBlock*)p;
 	}
 	else
-		sys_free(p);
+	{
+		if (p == NULL) return;
+#if LTALLOC_HAS_VMSIZE
+		// Note: on Windows, VirtualFree doesn't not need the size, but calling LTALLOC_VMSIZE does not cost anything since
+		// it gets removed during the expansion of LTALLOC_VMFREE.
+		LTALLOC_VMFREE(p, LTALLOC_VMSIZE(p));
+#else
+		size_t size = ptrie_remove(&largeAllocSizes, (uintptr_t)p);
+		LTALLOC_VMFREE(p, size);
+#endif
+	}
 }
 
 CPPCODE(extern "C") size_t ltmsize(void *p)
@@ -728,14 +976,10 @@ CPPCODE(extern "C") size_t ltmsize(void *p)
 	else
 	{
 		if (p == NULL) return 0;
-#ifdef _WIN32
-		{MEMORY_BASIC_INFORMATION mi;
-		VirtualQuery(p, &mi, sizeof(mi));
-		return mi.RegionSize;}
+#if LTALLOC_HAS_VMSIZE
+		return LTALLOC_VMSIZE(p);
 #else
-		SPINLOCK_ACQUIRE(&ptrieLock);
-		size_t size = ptrie_lookup((uintptr_t)p);
-		SPINLOCK_RELEASE(&ptrieLock);
+		size_t size = ptrie_lookup(&largeAllocSizes, (uintptr_t)p);
 		return size;
 #endif
 	}
@@ -763,12 +1007,21 @@ static void release_thread_cache(void *p)
 			if (tc->freeList) {//append tc->freeList to cc->freeList
 				tail->next = cc->freeList;
 				cc->freeList = tc->freeList;
-				assert(freeListSize == batch_size(sizeClass)+1 - tc->counter);
+				LTALLOC_ASSERT(freeListSize == batch_size(sizeClass)+1 - tc->counter);
 				cc->freeListSize += freeListSize;
 			}
 			SPINLOCK_RELEASE(&cc->lock);
+
+			tc->freeList = NULL;
+			tc->tempList = NULL;
+			tc->counter = 0;
 		}
 	}
+}
+
+CPPCODE(extern "C") void ltonthreadexit()
+{
+	release_thread_cache(0);
 }
 
 CPPCODE(extern "C") void ltsqueeze(size_t padsz)
@@ -797,11 +1050,11 @@ CPPCODE(extern "C") void ltsqueeze(size_t padsz)
 
 		//1. Find out chunks with only free blocks via a simple counting the number of free blocks in each chunk
 		{char buffer[32*1024];//enough for 1GB address space
-		unsigned short *inChunkFreeBlocks = (unsigned short*)(bufferSize <= sizeof(buffer) ? memset(buffer, 0, bufferSize) : VMALLOC(bufferSize));
+		unsigned short *inChunkFreeBlocks = (unsigned short*)(bufferSize <= sizeof(buffer) ? memset(buffer, 0, bufferSize) : LTALLOC_VMALLOC(bufferSize));
 		unsigned int numBlocksInChunk = (CHUNK_SIZE - (/*CHUNK_IS_SMALL ? sizeof(ChunkSm) : */sizeof(Chunk)))/class_to_size(sizeClass);
 		FreeBlock **pbatch, *block, **pblock;
 		Chunk *firstFreeChunk = NULL;
-		assert(numBlocksInChunk < (1U<<(sizeof(short)*8)));//in case if CHUNK_SIZE is too big that total count of blocks in it doesn't fit at short type (...may be use static_assert instead?)
+		LTALLOC_ASSERT(numBlocksInChunk < (1U<<(sizeof(short)*8)));//in case if CHUNK_SIZE is too big that total count of blocks in it doesn't fit at short type (...may be use static_assert instead?)
 		if (inChunkFreeBlocks)//consider VMALLOC can fail
 		{
 			for (pbatch = &firstBatch; *pbatch; pbatch = &(*pbatch)->nextBatch)
@@ -810,7 +1063,7 @@ CPPCODE(extern "C") void ltsqueeze(size_t padsz)
 					if (++inChunkFreeBlocks[((uintptr_t)block - minChunkAddr) / CHUNK_SIZE] == numBlocksInChunk)/*chunk is totally free*/\
 					{\
 						Chunk *chunk = (Chunk*)((uintptr_t)block & ~(CHUNK_SIZE-1));\
-						assert(chunk->sizeClass == sizeClass);/*just in case check before overwriting this info*/\
+						LTALLOC_ASSERT(chunk->sizeClass == sizeClass);/*just in case check before overwriting this info*/\
 						*(Chunk**)chunk = firstFreeChunk;/*put nextFreeChunk pointer right at the beginning of Chunk as there are always must be a space for one pointer before first memory block*/\
 						firstFreeChunk = chunk;\
 					}
@@ -898,7 +1151,7 @@ continue_:;
 			cc->freeList = freeList;\
 			cc->freeListSize += freeListSize;\
 			SPINLOCK_RELEASE(&cc->lock);\
-			if (bufferSize > sizeof(buffer)) VMFREE(inChunkFreeBlocks, bufferSize);//this better to do before 3. as kernel is likely optimized for release of just allocated range
+			if (bufferSize > sizeof(buffer)) LTALLOC_VMFREE(inChunkFreeBlocks, bufferSize);//this better to do before 3. as kernel is likely optimized for release of just allocated range
 			GIVE_LISTS_BACK_TO_CC
 
 			if (padsz)
@@ -923,7 +1176,7 @@ continue_:;
 			while (firstFreeChunk)
 			{
 				Chunk *nextFreeChunk = *(Chunk**)firstFreeChunk;
-				VMFREE(firstFreeChunk, CHUNK_SIZE);
+				LTALLOC_VMFREE(firstFreeChunk, CHUNK_SIZE);
 				firstFreeChunk = nextFreeChunk;
 			}
 		}
@@ -956,6 +1209,11 @@ void operator delete[](void* p, const std::nothrow_t&) throw() {ltfree(p);}
 
 /* @r-lyeh's { */
 #include <string.h>
+
+#ifdef LTALLOC_AUTO_GC_INTERVAL
+#include <time.h>
+#endif
+
 CPPCODE(extern "C") void *ltcalloc(size_t elems, size_t size) {
 	size *= elems;
 	return memset( ltmalloc( size ), 0, size );
