@@ -59,6 +59,14 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // Define to disable the override of the new operator (enabled by default if compiling this file in c++).
 //#define LTALLOC_DISABLE_OPERATOR_NEW_OVERRIDE
 
+// Define to disable the use of exceptions (enabled by default if compiling this file in c++).
+//#define LTALLOC_DISABLE_EXCEPTIONS
+#if defined(__cplusplus) && !defined(LTALLOC_DISABLE_EXCEPTIONS)
+#	define CPPCODE_EXCEPTION(code) code
+#else
+#	define CPPCODE_EXCEPTION(code)
+#endif
+
 // Define to enable an automatic call to ltsqueeze approximately every X seconds (3.0 by default). The call is made
 // during ltrealloc.
 #ifdef LTALLOC_AUTO_GC_INTERVAL
@@ -788,7 +796,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 			} else {
 				SPINLOCK_RELEASE(&pad.lock);
 				p = LTALLOC_VMALLOC_ALIGNED(CHUNK_SIZE, CHUNK_SIZE);
-				if (unlikely(!p)) { CPPCODE(if (throw_) throw std::bad_alloc(); else) return NULL; }
+				if (unlikely(!p)) { CPPCODE_EXCEPTION(if (throw_) throw std::bad_alloc(); else) return NULL; }
 			}
 
 #define CHUNK_IS_SMALL unlikely(sizeClass < get_size_class(2*sizeof(void*)))
@@ -878,7 +886,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 			}
 		}
 #endif
-		CPPCODE(if (throw_) if (unlikely(!p)) throw std::bad_alloc();)
+		CPPCODE_EXCEPTION(if (throw_) if (unlikely(!p)) throw std::bad_alloc();)
 		return p;
 	}
 }
