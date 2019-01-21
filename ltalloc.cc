@@ -196,7 +196,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif
 #else
 
-#ifdef __GNUC__
+#if defined __GNUC__ || __clang__
 #	define CAS_LOCK(lock) __sync_lock_test_and_set(lock, 1)
 #	define LTALLOC_SPINLOCK_RELEASE(lock) __sync_lock_release(lock)
 #	ifdef __sparc__
@@ -206,8 +206,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #	elif defined(__ANDROID__)
 #		include <sched.h> //for sched_yield
 #		define PAUSE sched_yield()
-#	else
+#	elif defined __i386__ || __x86_64__
 #		define PAUSE __asm__ __volatile__("pause" ::: "memory")
+#	else
+#	error Unsupported PAUSE implementation.
 #	endif
 #elif _MSC_VER
 #	include <intrin.h>
@@ -264,7 +266,7 @@ typedef char CODE3264_check[sizeof(void*) == CODE3264(4, 8) ? 1 : -1];
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-static size_t get_alloc_granularity()
+static std::size_t get_alloc_granularity()
 {
 	static DWORD allocationGranularity = 0;
 	if (!allocationGranularity) {
@@ -290,11 +292,11 @@ static size_t get_alloc_granularity()
 
 #include "ltalloc.h"
 
-static size_t page_size()
+static std::size_t page_size()
 {
 	LTALLOC_ASSERT((uintptr_t)MAP_FAILED+1 == 0);//have to use dynamic check somewhere, because some gcc versions (e.g. 4.4.5) won't compile typedef char MAP_FAILED_value_static_check[(uintptr_t)MAP_FAILED+1 == 0 ? 1 : -1];
-	static size_t pagesize = 0;
-	if (!pagesize) pagesize = sysconf(_SC_PAGE_SIZE);//assuming that writing of size_t value is atomic, so this can be done safely in different simultaneously running threads
+	static std::size_t pagesize = 0;
+	if (!pagesize) pagesize = sysconf(_SC_PAGE_SIZE);//assuming that writing of std::size_t value is atomic, so this can be done safely in different simultaneously running threads
 	return pagesize;
 }
 
@@ -322,7 +324,7 @@ static size_t page_size()
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-static size_t get_alloc_size(void *p)
+static std::size_t get_alloc_size(void *p)
 {
 	MEMORY_BASIC_INFORMATION mi;
 	VirtualQuery(p, &mi, sizeof(mi));
@@ -346,7 +348,7 @@ static size_t get_alloc_size(void *p)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-static void *sys_aligned_alloc(size_t alignment, size_t size)
+static void *sys_aligned_alloc(std::size_t alignment, std::size_t size)
 {
 	void *p = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);//optimistically try mapping precisely the right amount before falling back to the slow method
 	LTALLOC_ASSERT(!(alignment & (alignment - 1)) && "alignment must be a power of two");
@@ -374,7 +376,7 @@ static void *sys_aligned_alloc(size_t alignment, size_t size)
 
 #else
 
-static void *sys_aligned_alloc(size_t alignment, size_t size)
+static void *sys_aligned_alloc(std::size_t alignment, std::size_t size)
 {
 	void *p = LTALLOC_VMALLOC(size);//optimistically try mapping precisely the right amount before falling back to the slow method
 	LTALLOC_ASSERT(!(alignment & (alignment - 1)) && "alignment must be a power of two");
@@ -653,10 +655,10 @@ static struct
 {
 	LTALLOC_SPINLOCK_TYPE lock;
 	void *freeChunk;
-	size_t size;
+	std::size_t size;
 } pad = {0, NULL, 0};
 
-static CPPCODE(inline) unsigned int get_size_class(size_t size)
+static CPPCODE(inline) unsigned int get_size_class(std::size_t size)
 {
 	unsigned int index;
 #if _MSC_VER && LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO == 2
@@ -703,9 +705,9 @@ static unsigned int batch_size(unsigned int sizeClass)//calculates a number of b
 	return ((MAX_BATCH_SIZE-1) >> (sizeClass >> LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)) & (MAX_NUM_OF_BLOCKS_IN_BATCH-1);
 }
 
-CPPCODE(template <bool> static) void *ltmalloc(size_t size);
+CPPCODE(template <bool> static) void *ltmalloc(std::size_t size);
 
-CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t size, ThreadCache *tc, unsigned int sizeClass)
+CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(std::size_t size, ThreadCache *tc, unsigned int sizeClass)
 {
 	void *p;
 	if (likely(size-1u <= MAX_BLOCK_SIZE-1u))//<=> if (size <= MAX_BLOCK_SIZE && size != 0)
@@ -891,7 +893,7 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t siz
 	}
 }
 
-CPPCODE(template <bool throw_> static) void *ltmalloc(size_t size)
+CPPCODE(template <bool throw_> static) void *ltmalloc(std::size_t size)
 {
 	unsigned int sizeClass = get_size_class(size);
 	ThreadCache *tc = &threadCache[sizeClass];
@@ -905,7 +907,7 @@ CPPCODE(template <bool throw_> static) void *ltmalloc(size_t size)
 	else
 		return fetch_from_central_cache CPPCODE(<throw_>)(size, tc, sizeClass);
 }
-CPPCODE(extern "C" void *ltmalloc(size_t size) {return ltmalloc<false>(size);})//for possible external usage
+CPPCODE(extern "C" void *ltmalloc(std::size_t size) {return ltmalloc<false>(size);})//for possible external usage
 
 static void add_batch_to_central_cache(CentralCache *cc, unsigned int sizeClass, FreeBlock *batch)
 {
@@ -969,13 +971,13 @@ CPPCODE(extern "C") void ltfree(void *p)
 		// it gets removed during the expansion of LTALLOC_VMFREE.
 		LTALLOC_VMFREE(p, LTALLOC_VMSIZE(p));
 #else
-		size_t size = ptrie_remove(&largeAllocSizes, (uintptr_t)p);
+		std::size_t size = ptrie_remove(&largeAllocSizes, (uintptr_t)p);
 		LTALLOC_VMFREE(p, size);
 #endif
 	}
 }
 
-CPPCODE(extern "C") size_t ltmsize(void *p)
+CPPCODE(extern "C") std::size_t ltmsize(void *p)
 {
 	if (likely((uintptr_t)p & (CHUNK_SIZE-1)))
 	{
@@ -987,7 +989,7 @@ CPPCODE(extern "C") size_t ltmsize(void *p)
 #if LTALLOC_HAS_VMSIZE
 		return LTALLOC_VMSIZE(p);
 #else
-		size_t size = ptrie_lookup(&largeAllocSizes, (uintptr_t)p);
+		std::size_t size = ptrie_lookup(&largeAllocSizes, (uintptr_t)p);
 		return size;
 #endif
 	}
@@ -1032,7 +1034,7 @@ CPPCODE(extern "C") void ltonthreadexit()
 	release_thread_cache(0);
 }
 
-CPPCODE(extern "C") void ltsqueeze(size_t padsz)
+CPPCODE(extern "C") void ltsqueeze(std::size_t padsz)
 {
 	unsigned int sizeClass = get_size_class(2*sizeof(void*));//skip small chunks because corresponding batches can not be efficiently detached from the central cache (if that becomes relevant, may be it worths to reimplement batches for small chunks from array to linked lists)
 	for (;sizeClass < NUMBER_OF_SIZE_CLASSES; sizeClass++)
@@ -1047,7 +1049,7 @@ CPPCODE(extern "C") void ltsqueeze(size_t padsz)
 			continue;
 		}
 		{uintptr_t minChunkAddr = cc->minChunkAddr;
-		size_t bufferSize = ((cc->maxChunkAddr - minChunkAddr) / CHUNK_SIZE + 1) * sizeof(short);
+		std::size_t bufferSize = ((cc->maxChunkAddr - minChunkAddr) / CHUNK_SIZE + 1) * sizeof(short);
 		//Quickly detach all batches of the current size class from the central cache
 		unsigned int freeListSize = cc->freeListSize;
 		FreeBlock *firstBatch = cc->firstBatch, *freeList = cc->freeList;
@@ -1204,10 +1206,10 @@ continue_:;
 #define THROWS throw(std::bad_alloc)
 #endif
 
-void *operator new  (size_t size) THROWS                         {return ltmalloc<true> (size);}
-void *operator new  (size_t size, const std::nothrow_t&) throw() {return ltmalloc<false>(size);}
-void *operator new[](size_t size) THROWS                         {return ltmalloc<true> (size);}
-void *operator new[](size_t size, const std::nothrow_t&) throw() {return ltmalloc<false>(size);}
+void *operator new  (std::size_t size) THROWS                         {return ltmalloc<true> (size);}
+void *operator new  (std::size_t size, const std::nothrow_t&) throw() {return ltmalloc<false>(size);}
+void *operator new[](std::size_t size) THROWS                         {return ltmalloc<true> (size);}
+void *operator new[](std::size_t size, const std::nothrow_t&) throw() {return ltmalloc<false>(size);}
 
 void operator delete  (void* p)                        throw() {ltfree(p);}
 void operator delete  (void* p, const std::nothrow_t&) throw() {ltfree(p);}
@@ -1222,17 +1224,17 @@ void operator delete[](void* p, const std::nothrow_t&) throw() {ltfree(p);}
 #include <time.h>
 #endif
 
-CPPCODE(extern "C") void *ltcalloc(size_t elems, size_t size) {
+CPPCODE(extern "C") void *ltcalloc(std::size_t elems, std::size_t size) {
 	size *= elems;
 	return memset( ltmalloc( size ), 0, size );
 }
-CPPCODE(extern "C") void *ltmemalign( size_t align, size_t size ) {
+CPPCODE(extern "C") void *ltmemalign( std::size_t align, std::size_t size ) {
 	return --align, ltmalloc( (size+align)&~align );
 }
-CPPCODE(extern "C") void *ltrealloc( void *ptr, size_t sz ) {
+CPPCODE(extern "C") void *ltrealloc( void *ptr, std::size_t sz ) {
 	if( !ptr ) return ltmalloc( sz );
 	if( !sz  ) return ltfree( ptr ), (void *)0;
-	size_t osz = ltmsize( ptr );
+	std::size_t osz = ltmsize( ptr );
 	if( sz <= osz ) {
 		return ptr;
 	}
