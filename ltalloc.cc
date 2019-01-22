@@ -125,7 +125,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Defined to 1 when compiling in 64 bits mode (.ie pointers are 64 bits).
 #ifndef LTALLOC_64BITS
-#ifdef __GNUC__
+#if defined __GNUC__ || defined __clang__
 #	define __STDC_LIMIT_MACROS
 #	include <stdint.h>
 #	define LTALLOC_64BITS (UINTPTR_MAX == UINT64_MAX)
@@ -142,7 +142,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Allows to declare an aligned variable or struct. Equivalent to c++11 alignas keyword.
 #ifndef LTALLOC_ALIGNAS
-#ifdef __GNUC__
+#if defined __GNUC__ || defined __clang__
 #	define LTALLOC_ALIGNAS(a) __attribute__((aligned(a)))
 #elif _MSC_VER
 #	define LTALLOC_ALIGNAS(a) __declspec(align(a))
@@ -153,7 +153,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Allows to declare a thread local variable. Equivalent to c++11 thread_local keyworkd.
 #ifndef LTALLOC_THREAD_LOCAL
-#ifdef __GNUC__
+#if defined __GNUC__ || defined __clang__
 #	define LTALLOC_THREAD_LOCAL __thread
 #elif _MSC_VER
 #	define LTALLOC_THREAD_LOCAL __declspec(thread)
@@ -164,7 +164,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Tells the compiler not to inline a function.
 #ifndef LTALLOC_NOINLINE
-#ifdef __GNUC__
+#if defined __GNUC__ || defined __clang__
 #	define LTALLOC_NOINLINE  __attribute__((noinline))
 #elif _MSC_VER
 #	define LTALLOC_NOINLINE __declspec(noinline)
@@ -179,7 +179,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #	error LTALLOC_LIKELY and LTALLOC_UNLIKELY should either both be provided, or both left undefined.
 #endif
 #else
-#if __GNUC__ || __INTEL_COMPILER
+#if defined__GNUC__ || defined __clang__ || defined __INTEL_COMPILER
 #	define LTALLOC_LIKELY(x) __builtin_expect(!!(x), 1)
 #	define LTALLOC_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
@@ -196,7 +196,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif
 #else
 
-#if defined __GNUC__ || __clang__
+#if defined __GNUC__ || defined __clang__
 #	define CAS_LOCK(lock) __sync_lock_test_and_set(lock, 1)
 #	define LTALLOC_SPINLOCK_RELEASE(lock) __sync_lock_release(lock)
 #	ifdef __sparc__
@@ -233,7 +233,7 @@ static void spinlock_acquire(volatile int *lock)
 
 // Searches in reverse order (from most significant bit to least) for the firt bit set in v and writes its index into r.
 #ifndef LTALLOC_BIT_SCAN_REVERSE
-#ifdef __GNUC__
+#if defined __GNUC__ || defined __clang__
 #	define LTALLOC_BIT_SCAN_REVERSE(r, v) r = CODE3264(__builtin_clz(v) ^ 31, __builtin_clzll(v) ^ 63)//x ^ 31 = 31 - x, but gcc does not optimize 31 - __builtin_clz(x) to bsr(x), but generates 31 - (bsr(x) ^ 31)
 #elif _MSC_VER
 #	include <intrin.h>
@@ -412,7 +412,7 @@ static void *sys_aligned_alloc(std::size_t alignment, std::size_t size)
 
 #if LTALLOC_AUTO_RELEASE_THREAD_CACHE
 static void release_thread_cache(void*);
-#ifdef __GNUC__
+#if defined __GNUC__ || defined __clang__
 #include <pthread.h>
 #pragma weak pthread_once
 #pragma weak pthread_key_create
