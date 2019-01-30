@@ -179,7 +179,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #	error LTALLOC_LIKELY and LTALLOC_UNLIKELY should either both be provided, or both left undefined.
 #endif
 #else
-#if defined__GNUC__ || defined __clang__ || defined __INTEL_COMPILER
+#if defined __GNUC__ || defined __clang__ || defined __INTEL_COMPILER
 #	define LTALLOC_LIKELY(x) __builtin_expect(!!(x), 1)
 #	define LTALLOC_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
