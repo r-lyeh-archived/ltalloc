@@ -68,12 +68,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #	define CPPCODE_EXCEPTION(code)
 #endif
 
-// Define to enable an automatic call to ltsqueeze approximately every X seconds (3.0 by default). The call is made
-// during ltrealloc.
+// Define to enable an automatic call to ltsqueeze approximately every X calls (1000 by default). The call is made during ltrealloc()
 #ifdef LTALLOC_AUTO_GC_INTERVAL
-#	if			LTALLOC_AUTO_GC_INTERVAL <= 0
-#		undef	LTALLOC_AUTO_GC_INTERVAL 
-#		define	LTALLOC_AUTO_GC_INTERVAL 3.00
+#	if	LTALLOC_AUTO_GC_INTERVAL <= 0
+#		undef	LTALLOC_AUTO_GC_INTERVAL
+#		define	LTALLOC_AUTO_GC_INTERVAL 1000
 #	endif
 #endif
 
@@ -1054,12 +1053,18 @@ CPPCODE(extern "C") size_t ltmsize(void *p)
 	else
 	{
 		if (p == NULL) return 0;
+
 #if LTALLOC_HAS_VMSIZE
-		return LTALLOC_VMSIZE(p);
+		size_t size = LTALLOC_VMSIZE(p);
 #else
 		size_t size = ptrie_lookup(&largeAllocSizes, (uintptr_t)p);
-		return size;
 #endif
+
+#ifdef LTALLOC_OVERFLOW_DETECTION
+		size -= LTALLOC_CANARY_SIZE;
+#endif
+
+		return size;
 	}
 }
 
@@ -1289,10 +1294,6 @@ void operator delete[](void* p, const std::nothrow_t&) throw() {ltfree(p);}
 /* @r-lyeh's { */
 #include <string.h>
 
-#ifdef LTALLOC_AUTO_GC_INTERVAL
-#include <time.h>
-#endif
-
 CPPCODE(extern "C") void *ltcalloc(size_t elems, size_t size) {
 	size *= elems;
 	return memset( ltmalloc( size ), 0, size );
@@ -1311,9 +1312,6 @@ CPPCODE(extern "C") void *ltrealloc( void *ptr, size_t sz ) {
 	if( !ptr ) return ltmalloc( sz );
 	if( !sz  ) return ltfree( ptr ), (void *)0;
 	size_t osz = ltmsize( ptr );
-#ifdef LTALLOC_OVERFLOW_DETECTION
-	osz -= LTALLOC_CANARY_SIZE;
-#endif
 	if( sz <= osz ) {
 		return ptr;
 	}
@@ -1321,16 +1319,15 @@ CPPCODE(extern "C") void *ltrealloc( void *ptr, size_t sz ) {
 	ltfree( ptr );
 
 #ifdef LTALLOC_AUTO_GC_INTERVAL
-	/* this is kind of compromise; the following timer is to guarantee
-	that memory gets wiped out at least every given seconds between consecutive 
-	ltrealloc() calls (I am assuming frequency usage for ltrealloc() is smaller
-	than ltmalloc() or ltfree() too) - @r-lyeh */
-			clock_t now = clock();
-	static	clock_t then = now;
-	if( ( double(now - then) / CLOCKS_PER_SEC ) > LTALLOC_AUTO_GC_INTERVAL ) {
+	/* this is kind of compromise; the following call number is to guarantee
+	that memory gets wiped out at least every 1,000 calls between consecutive 
+	ltrealloc() calls (I am assuming frequency usage for regular ltrealloc() is
+	smaller than ltmalloc() or ltfree() too; so that's why the check is here)
+	- @r-lyeh */
+	static LTALLOC_THREAD_LOCAL unsigned times = 0;
+	if( !((++times) % LTALLOC_AUTO_GC_INTERVAL) ) {
 		ltsqueeze(0);
 	}
-	then = now;
 #endif
 
 	return nptr;
