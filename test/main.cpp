@@ -59,4 +59,11 @@ TEST_CASE("Original test code from the wiki", "[ltalloc]")
 	}
 
 	std::cout << "Max: " << std::fixed << maxmops << " millions operations per second\n";
+
+#ifdef LTALLOC_OVERFLOW_DETECTION
+	std::cout << "following assert should trigger!\n";
+	int *overflow = new int (1);
+	overflow[1] = 1;
+	delete overflow;
+#endif
 }

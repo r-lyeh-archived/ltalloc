@@ -251,6 +251,18 @@ static void spinlock_acquire(volatile int *lock)
 
 typedef char CODE3264_check[sizeof(void*) == CODE3264(4, 8) ? 1 : -1];
 
+#ifndef LTALLOC_CANARY_TYPE
+#define LTALLOC_CANARY_TYPE unsigned int
+#endif
+
+#ifndef LTALLOC_CANARY_SIZE
+#define LTALLOC_CANARY_SIZE (sizeof(LTALLOC_CANARY_TYPE))
+#endif
+
+#ifndef LTALLOC_CANARY
+#define LTALLOC_CANARY 0xFDFDFDFD
+#endif
+
 // LTALLOC_VMALLOC(size) allocates a size bytes of virtual memory. Returns 0 if allocation fails. The allocated memory is zeroed.
 // LTALLOC_VMFREE(p, size) frees a previously allocated virtual memory.
 // LTALLOC_VMALLOC_MIN_SIZE() returns the minimum size allocatable by LTALLOC_VMALLOC.
@@ -705,6 +717,20 @@ static unsigned int batch_size(unsigned int sizeClass)//calculates a number of b
 	return ((MAX_BATCH_SIZE-1) >> (sizeClass >> LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO)) & (MAX_NUM_OF_BLOCKS_IN_BATCH-1);
 }
 
+void check_block_next(FreeBlock *fb)
+{
+#ifdef LTALLOC_NEXT_POINTER_CHECK
+	LTALLOC_ASSERT(fb && fb->next != fb);
+#endif
+}
+
+void check_block_next(ChunkSm *fb)
+{
+#ifdef LTALLOC_NEXT_POINTER_CHECK
+	LTALLOC_ASSERT(fb && fb->next != fb);
+#endif
+}
+
 CPPCODE(template <bool> static) void *ltmalloc(std::size_t size);
 
 CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(std::size_t size, ThreadCache *tc, unsigned int sizeClass)
@@ -777,7 +803,10 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(std::size_
 				SPINLOCK_RELEASE(&cc->lock);
 				fb = (FreeBlock*)firstFree;
 				while (--batchSize)
+				{
 					firstFree = (char*)(((FreeBlock*)firstFree)->next = (FreeBlock*)(firstFree + blockSize));
+					check_block_next((FreeBlock*)firstFree);
+				}
 				((FreeBlock*)firstFree)->next = NULL;
 				tc->freeList = fb->next;
 				init_pthread_destructor();
@@ -818,7 +847,11 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(std::size_
 			{char *firstFree = (char*)p + CHUNK_SIZE - numBlocksInChunk*blockSize;//blocks in chunk are located in such way to achieve a maximum possible alignment
 			fb = (FreeBlock*)firstFree;
 			{int n = batchSize; while (--n)
-				firstFree = (char*)(((FreeBlock*)firstFree)->next = (FreeBlock*)(firstFree + blockSize));}
+			{
+				firstFree = (char*)(((FreeBlock*)firstFree)->next = (FreeBlock*)(firstFree + blockSize));
+				check_block_next((FreeBlock*)firstFree);
+			}
+			}
 			((FreeBlock*)firstFree)->next = NULL;
 			firstFree += blockSize;
 
@@ -833,9 +866,9 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(std::size_
 				//Insert new chunk right after chunkWithFreeBatches
 				cs->prev = cc->chunkWithFreeBatches;
 				if (cc->chunkWithFreeBatches) {
-					cs->next = cc->chunkWithFreeBatches->next;
+					{ cs->next = cc->chunkWithFreeBatches->next; check_block_next(cs); }
 					if (cc->chunkWithFreeBatches->next) cc->chunkWithFreeBatches->next->prev = cs;
-					cc->chunkWithFreeBatches->next = cs;
+					cc->chunkWithFreeBatches->next = cs; check_block_next(cc->chunkWithFreeBatches);
 				} else {
 					cs->next = NULL;
 					cc->chunkWithFreeBatches = cs;
@@ -895,17 +928,38 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(std::size_
 
 CPPCODE(template <bool throw_> static) void *ltmalloc(std::size_t size)
 {
-	unsigned int sizeClass = get_size_class(size);
+#ifdef LTALLOC_OVERFLOW_DETECTION
+	std::size_t size_final = size + LTALLOC_CANARY_SIZE;
+#else
+	std::size_t size_final = size;
+#endif
+
+	unsigned int sizeClass = get_size_class(size_final);
 	ThreadCache *tc = &threadCache[sizeClass];
 	FreeBlock *fb = tc->freeList;
+	uintptr_t buffer = NULL;
+#ifdef LTALLOC_OVERFLOW_DETECTION
+	std::size_t size_chunk = class_to_size(sizeClass);;
+#endif
 	if (likely(fb))
 	{
 		tc->freeList = fb->next;
 		tc->counter++;
-		return fb;
+		buffer = (uintptr_t)fb;
 	}
 	else
-		return fetch_from_central_cache CPPCODE(<throw_>)(size, tc, sizeClass);
+	{
+		buffer = (uintptr_t)fetch_from_central_cache CPPCODE(<throw_>)(size_final, tc, sizeClass);
+#ifdef LTALLOC_OVERFLOW_DETECTION
+		size_chunk = ltmsize((void*)buffer);
+#endif
+	}
+
+#ifdef LTALLOC_OVERFLOW_DETECTION
+	*(LTALLOC_CANARY_TYPE*)(buffer + size_chunk - LTALLOC_CANARY_SIZE) = LTALLOC_CANARY;
+#endif
+
+	return (void*)buffer;
 }
 CPPCODE(extern "C" void *ltmalloc(std::size_t size) {return ltmalloc<false>(size);})//for possible external usage
 
@@ -950,8 +1004,22 @@ static LTALLOC_NOINLINE void move_to_central_cache(ThreadCache *tc, unsigned int
 	tc->freeList = NULL;
 }
 
+CPPCODE(extern "C") std::size_t ltmsize(void *p);
 CPPCODE(extern "C") void ltfree(void *p)
 {
+#ifdef LTALLOC_OVERFLOW_DETECTION
+	if (p)
+	{
+		std::size_t size = ltmsize(p);
+		LTALLOC_ASSERT(size >= LTALLOC_CANARY_SIZE);
+		std::size_t size_without_canary = size - LTALLOC_CANARY_SIZE;
+		
+		uintptr_t ptr = (uintptr_t )p;
+		ptr += size_without_canary;
+		LTALLOC_ASSERT("memory overflow detected!" && *(LTALLOC_CANARY_TYPE*)ptr == LTALLOC_CANARY);
+	}
+#endif
+
 	if (likely((uintptr_t)p & (CHUNK_SIZE-1)))
 	{
 		unsigned int sizeClass = ((Chunk*)((uintptr_t)p & ~(CHUNK_SIZE-1)))->sizeClass;
@@ -961,6 +1029,7 @@ CPPCODE(extern "C") void ltfree(void *p)
 			move_to_central_cache(tc, sizeClass);
 
 		((FreeBlock*)p)->next = tc->freeList;
+		check_block_next((FreeBlock*)p);
 		tc->freeList = (FreeBlock*)p;
 	}
 	else
@@ -1016,6 +1085,7 @@ static void release_thread_cache(void *p)
 				add_batch_to_central_cache(cc, sizeClass, tc->tempList);
 			if (tc->freeList) {//append tc->freeList to cc->freeList
 				tail->next = cc->freeList;
+				check_block_next(tail);
 				cc->freeList = tc->freeList;
 				LTALLOC_ASSERT(freeListSize == batch_size(sizeClass)+1 - tc->counter);
 				cc->freeListSize += freeListSize;
@@ -1229,12 +1299,22 @@ CPPCODE(extern "C") void *ltcalloc(std::size_t elems, std::size_t size) {
 	return memset( ltmalloc( size ), 0, size );
 }
 CPPCODE(extern "C") void *ltmemalign( std::size_t align, std::size_t size ) {
-	return --align, ltmalloc( (size+align)&~align );
+#ifdef LTALLOC_OVERFLOW_DETECTION
+	std::size_t align_minus_one = align - 1;
+	void* p = ltmalloc(((size + LTALLOC_CANARY_SIZE + align_minus_one)&~align_minus_one) - LTALLOC_CANARY_SIZE);
+	LTALLOC_ASSERT(((uintptr_t)p % align) == 0);
+	return p;
+#else
+	return --align, ltmalloc((size + align)&~align);
+#endif
 }
 CPPCODE(extern "C") void *ltrealloc( void *ptr, std::size_t sz ) {
 	if( !ptr ) return ltmalloc( sz );
 	if( !sz  ) return ltfree( ptr ), (void *)0;
 	std::size_t osz = ltmsize( ptr );
+#ifdef LTALLOC_OVERFLOW_DETECTION
+	osz -= LTALLOC_CANARY_SIZE;
+#endif
 	if( sz <= osz ) {
 		return ptr;
 	}
