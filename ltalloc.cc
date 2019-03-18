@@ -36,7 +36,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   Project URL: http://code.google.com/p/ltalloc
 */
 
-#define LTALLOC_VERSION "2.0.1" /* (2018/07/09) - fix android (arm) build
+#define LTALLOC_VERSION "2.0.2" /* (2019/04/18) - new LTALLOC_OVERFLOW_DETECTION directive
+#define LTALLOC_VERSION "2.0.1" // (2018/07/09) - fix android (arm) build
 #define LTALLOC_VERSION "2.0.0" // (2015/06/16) - ltcalloc(), ltmsize(), ltrealloc(), ltmemalign(), LTALLOC_AUTO_GC_INTERVAL
 #define LTALLOC_VERSION "1.0.0" // (2015/06/16) - standard STL allocator provided [see ltalloc.hpp file](ltalloc.hpp)
 #define LTALLOC_VERSION "0.0.0" // (2013/xx/xx) - fork from public repository */
@@ -125,7 +126,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Defined to 1 when compiling in 64 bits mode (.ie pointers are 64 bits).
 #ifndef LTALLOC_64BITS
-#if defined __GNUC__ || defined __clang__
+#ifdef __GNUC__
 #	define __STDC_LIMIT_MACROS
 #	include <stdint.h>
 #	define LTALLOC_64BITS (UINTPTR_MAX == UINT64_MAX)
@@ -142,7 +143,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Allows to declare an aligned variable or struct. Equivalent to c++11 alignas keyword.
 #ifndef LTALLOC_ALIGNAS
-#if defined __GNUC__ || defined __clang__
+#ifdef __GNUC__
 #	define LTALLOC_ALIGNAS(a) __attribute__((aligned(a)))
 #elif _MSC_VER
 #	define LTALLOC_ALIGNAS(a) __declspec(align(a))
@@ -153,7 +154,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Allows to declare a thread local variable. Equivalent to c++11 thread_local keyworkd.
 #ifndef LTALLOC_THREAD_LOCAL
-#if defined __GNUC__ || defined __clang__
+#ifdef __GNUC__
 #	define LTALLOC_THREAD_LOCAL __thread
 #elif _MSC_VER
 #	define LTALLOC_THREAD_LOCAL __declspec(thread)
@@ -164,7 +165,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Tells the compiler not to inline a function.
 #ifndef LTALLOC_NOINLINE
-#if defined __GNUC__ || defined __clang__
+#ifdef __GNUC__
 #	define LTALLOC_NOINLINE  __attribute__((noinline))
 #elif _MSC_VER
 #	define LTALLOC_NOINLINE __declspec(noinline)
@@ -179,7 +180,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #	error LTALLOC_LIKELY and LTALLOC_UNLIKELY should either both be provided, or both left undefined.
 #endif
 #else
-#if defined __GNUC__ || defined __clang__ || defined __INTEL_COMPILER
+#if defined __GNUC__ || defined __INTEL_COMPILER
 #	define LTALLOC_LIKELY(x) __builtin_expect(!!(x), 1)
 #	define LTALLOC_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
@@ -196,7 +197,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif
 #else
 
-#if defined __GNUC__ || defined __clang__
+#ifdef __GNUC__
 #	define CAS_LOCK(lock) __sync_lock_test_and_set(lock, 1)
 #	define LTALLOC_SPINLOCK_RELEASE(lock) __sync_lock_release(lock)
 #	ifdef __sparc__
@@ -206,10 +207,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #	elif defined(__ANDROID__)
 #		include <sched.h> //for sched_yield
 #		define PAUSE sched_yield()
-#	elif defined __i386__ || __x86_64__
-#		define PAUSE __asm__ __volatile__("pause" ::: "memory")
 #	else
-#	error Unsupported PAUSE implementation.
+#		define PAUSE __asm__ __volatile__("pause" ::: "memory")
 #	endif
 #elif _MSC_VER
 #	include <intrin.h>
@@ -233,7 +232,7 @@ static void spinlock_acquire(volatile int *lock)
 
 // Searches in reverse order (from most significant bit to least) for the firt bit set in v and writes its index into r.
 #ifndef LTALLOC_BIT_SCAN_REVERSE
-#if defined __GNUC__ || defined __clang__
+#ifdef __GNUC__
 #	define LTALLOC_BIT_SCAN_REVERSE(r, v) r = CODE3264(__builtin_clz(v) ^ 31, __builtin_clzll(v) ^ 63)//x ^ 31 = 31 - x, but gcc does not optimize 31 - __builtin_clz(x) to bsr(x), but generates 31 - (bsr(x) ^ 31)
 #elif _MSC_VER
 #	include <intrin.h>
@@ -278,7 +277,7 @@ typedef char CODE3264_check[sizeof(void*) == CODE3264(4, 8) ? 1 : -1];
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-static std::size_t get_alloc_granularity()
+static size_t get_alloc_granularity()
 {
 	static DWORD allocationGranularity = 0;
 	if (!allocationGranularity) {
@@ -304,11 +303,11 @@ static std::size_t get_alloc_granularity()
 
 #include "ltalloc.h"
 
-static std::size_t page_size()
+static size_t page_size()
 {
 	LTALLOC_ASSERT((uintptr_t)MAP_FAILED+1 == 0);//have to use dynamic check somewhere, because some gcc versions (e.g. 4.4.5) won't compile typedef char MAP_FAILED_value_static_check[(uintptr_t)MAP_FAILED+1 == 0 ? 1 : -1];
-	static std::size_t pagesize = 0;
-	if (!pagesize) pagesize = sysconf(_SC_PAGE_SIZE);//assuming that writing of std::size_t value is atomic, so this can be done safely in different simultaneously running threads
+	static size_t pagesize = 0;
+	if (!pagesize) pagesize = sysconf(_SC_PAGE_SIZE);//assuming that writing of size_t value is atomic, so this can be done safely in different simultaneously running threads
 	return pagesize;
 }
 
@@ -336,7 +335,7 @@ static std::size_t page_size()
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-static std::size_t get_alloc_size(void *p)
+static size_t get_alloc_size(void *p)
 {
 	MEMORY_BASIC_INFORMATION mi;
 	VirtualQuery(p, &mi, sizeof(mi));
@@ -360,7 +359,7 @@ static std::size_t get_alloc_size(void *p)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-static void *sys_aligned_alloc(std::size_t alignment, std::size_t size)
+static void *sys_aligned_alloc(size_t alignment, size_t size)
 {
 	void *p = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);//optimistically try mapping precisely the right amount before falling back to the slow method
 	LTALLOC_ASSERT(!(alignment & (alignment - 1)) && "alignment must be a power of two");
@@ -388,7 +387,7 @@ static void *sys_aligned_alloc(std::size_t alignment, std::size_t size)
 
 #else
 
-static void *sys_aligned_alloc(std::size_t alignment, std::size_t size)
+static void *sys_aligned_alloc(size_t alignment, size_t size)
 {
 	void *p = LTALLOC_VMALLOC(size);//optimistically try mapping precisely the right amount before falling back to the slow method
 	LTALLOC_ASSERT(!(alignment & (alignment - 1)) && "alignment must be a power of two");
@@ -424,7 +423,7 @@ static void *sys_aligned_alloc(std::size_t alignment, std::size_t size)
 
 #if LTALLOC_AUTO_RELEASE_THREAD_CACHE
 static void release_thread_cache(void*);
-#if defined __GNUC__ || defined __clang__
+#ifdef __GNUC__
 #include <pthread.h>
 #pragma weak pthread_once
 #pragma weak pthread_key_create
@@ -667,10 +666,10 @@ static struct
 {
 	LTALLOC_SPINLOCK_TYPE lock;
 	void *freeChunk;
-	std::size_t size;
+	size_t size;
 } pad = {0, NULL, 0};
 
-static CPPCODE(inline) unsigned int get_size_class(std::size_t size)
+static CPPCODE(inline) unsigned int get_size_class(size_t size)
 {
 	unsigned int index;
 #if _MSC_VER && LTALLOC_SIZE_CLASSES_SUBPOWER_OF_TWO == 2
@@ -731,9 +730,9 @@ void check_block_next(ChunkSm *fb)
 #endif
 }
 
-CPPCODE(template <bool> static) void *ltmalloc(std::size_t size);
+CPPCODE(template <bool> static) void *ltmalloc(size_t size);
 
-CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(std::size_t size, ThreadCache *tc, unsigned int sizeClass)
+CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(size_t size, ThreadCache *tc, unsigned int sizeClass)
 {
 	void *p;
 	if (likely(size-1u <= MAX_BLOCK_SIZE-1u))//<=> if (size <= MAX_BLOCK_SIZE && size != 0)
@@ -926,12 +925,12 @@ CPPCODE(template <bool throw_>) static void *fetch_from_central_cache(std::size_
 	}
 }
 
-CPPCODE(template <bool throw_> static) void *ltmalloc(std::size_t size)
+CPPCODE(template <bool throw_> static) void *ltmalloc(size_t size)
 {
 #ifdef LTALLOC_OVERFLOW_DETECTION
-	std::size_t size_final = size + LTALLOC_CANARY_SIZE;
+	size_t size_final = size + LTALLOC_CANARY_SIZE;
 #else
-	std::size_t size_final = size;
+	size_t size_final = size;
 #endif
 
 	unsigned int sizeClass = get_size_class(size_final);
@@ -939,7 +938,7 @@ CPPCODE(template <bool throw_> static) void *ltmalloc(std::size_t size)
 	FreeBlock *fb = tc->freeList;
 	uintptr_t buffer = NULL;
 #ifdef LTALLOC_OVERFLOW_DETECTION
-	std::size_t size_chunk = class_to_size(sizeClass);;
+	size_t size_chunk = class_to_size(sizeClass);;
 #endif
 	if (likely(fb))
 	{
@@ -961,7 +960,7 @@ CPPCODE(template <bool throw_> static) void *ltmalloc(std::size_t size)
 
 	return (void*)buffer;
 }
-CPPCODE(extern "C" void *ltmalloc(std::size_t size) {return ltmalloc<false>(size);})//for possible external usage
+CPPCODE(extern "C" void *ltmalloc(size_t size) {return ltmalloc<false>(size);})//for possible external usage
 
 static void add_batch_to_central_cache(CentralCache *cc, unsigned int sizeClass, FreeBlock *batch)
 {
@@ -1004,15 +1003,15 @@ static LTALLOC_NOINLINE void move_to_central_cache(ThreadCache *tc, unsigned int
 	tc->freeList = NULL;
 }
 
-CPPCODE(extern "C") std::size_t ltmsize(void *p);
+CPPCODE(extern "C") size_t ltmsize(void *p);
 CPPCODE(extern "C") void ltfree(void *p)
 {
 #ifdef LTALLOC_OVERFLOW_DETECTION
 	if (p)
 	{
-		std::size_t size = ltmsize(p);
+		size_t size = ltmsize(p);
 		LTALLOC_ASSERT(size >= LTALLOC_CANARY_SIZE);
-		std::size_t size_without_canary = size - LTALLOC_CANARY_SIZE;
+		size_t size_without_canary = size - LTALLOC_CANARY_SIZE;
 		
 		uintptr_t ptr = (uintptr_t )p;
 		ptr += size_without_canary;
@@ -1040,13 +1039,13 @@ CPPCODE(extern "C") void ltfree(void *p)
 		// it gets removed during the expansion of LTALLOC_VMFREE.
 		LTALLOC_VMFREE(p, LTALLOC_VMSIZE(p));
 #else
-		std::size_t size = ptrie_remove(&largeAllocSizes, (uintptr_t)p);
+		size_t size = ptrie_remove(&largeAllocSizes, (uintptr_t)p);
 		LTALLOC_VMFREE(p, size);
 #endif
 	}
 }
 
-CPPCODE(extern "C") std::size_t ltmsize(void *p)
+CPPCODE(extern "C") size_t ltmsize(void *p)
 {
 	if (likely((uintptr_t)p & (CHUNK_SIZE-1)))
 	{
@@ -1058,7 +1057,7 @@ CPPCODE(extern "C") std::size_t ltmsize(void *p)
 #if LTALLOC_HAS_VMSIZE
 		return LTALLOC_VMSIZE(p);
 #else
-		std::size_t size = ptrie_lookup(&largeAllocSizes, (uintptr_t)p);
+		size_t size = ptrie_lookup(&largeAllocSizes, (uintptr_t)p);
 		return size;
 #endif
 	}
@@ -1104,7 +1103,7 @@ CPPCODE(extern "C") void ltonthreadexit()
 	release_thread_cache(0);
 }
 
-CPPCODE(extern "C") void ltsqueeze(std::size_t padsz)
+CPPCODE(extern "C") void ltsqueeze(size_t padsz)
 {
 	unsigned int sizeClass = get_size_class(2*sizeof(void*));//skip small chunks because corresponding batches can not be efficiently detached from the central cache (if that becomes relevant, may be it worths to reimplement batches for small chunks from array to linked lists)
 	for (;sizeClass < NUMBER_OF_SIZE_CLASSES; sizeClass++)
@@ -1119,7 +1118,7 @@ CPPCODE(extern "C") void ltsqueeze(std::size_t padsz)
 			continue;
 		}
 		{uintptr_t minChunkAddr = cc->minChunkAddr;
-		std::size_t bufferSize = ((cc->maxChunkAddr - minChunkAddr) / CHUNK_SIZE + 1) * sizeof(short);
+		size_t bufferSize = ((cc->maxChunkAddr - minChunkAddr) / CHUNK_SIZE + 1) * sizeof(short);
 		//Quickly detach all batches of the current size class from the central cache
 		unsigned int freeListSize = cc->freeListSize;
 		FreeBlock *firstBatch = cc->firstBatch, *freeList = cc->freeList;
@@ -1276,10 +1275,10 @@ continue_:;
 #define THROWS throw(std::bad_alloc)
 #endif
 
-void *operator new  (std::size_t size) THROWS                         {return ltmalloc<true> (size);}
-void *operator new  (std::size_t size, const std::nothrow_t&) throw() {return ltmalloc<false>(size);}
-void *operator new[](std::size_t size) THROWS                         {return ltmalloc<true> (size);}
-void *operator new[](std::size_t size, const std::nothrow_t&) throw() {return ltmalloc<false>(size);}
+void *operator new  (size_t size) THROWS                         {return ltmalloc<true> (size);}
+void *operator new  (size_t size, const std::nothrow_t&) throw() {return ltmalloc<false>(size);}
+void *operator new[](size_t size) THROWS                         {return ltmalloc<true> (size);}
+void *operator new[](size_t size, const std::nothrow_t&) throw() {return ltmalloc<false>(size);}
 
 void operator delete  (void* p)                        throw() {ltfree(p);}
 void operator delete  (void* p, const std::nothrow_t&) throw() {ltfree(p);}
@@ -1294,13 +1293,13 @@ void operator delete[](void* p, const std::nothrow_t&) throw() {ltfree(p);}
 #include <time.h>
 #endif
 
-CPPCODE(extern "C") void *ltcalloc(std::size_t elems, std::size_t size) {
+CPPCODE(extern "C") void *ltcalloc(size_t elems, size_t size) {
 	size *= elems;
 	return memset( ltmalloc( size ), 0, size );
 }
-CPPCODE(extern "C") void *ltmemalign( std::size_t align, std::size_t size ) {
+CPPCODE(extern "C") void *ltmemalign( size_t align, size_t size ) {
 #ifdef LTALLOC_OVERFLOW_DETECTION
-	std::size_t align_minus_one = align - 1;
+	size_t align_minus_one = align - 1;
 	void* p = ltmalloc(((size + LTALLOC_CANARY_SIZE + align_minus_one)&~align_minus_one) - LTALLOC_CANARY_SIZE);
 	LTALLOC_ASSERT(((uintptr_t)p % align) == 0);
 	return p;
@@ -1308,10 +1307,10 @@ CPPCODE(extern "C") void *ltmemalign( std::size_t align, std::size_t size ) {
 	return --align, ltmalloc((size + align)&~align);
 #endif
 }
-CPPCODE(extern "C") void *ltrealloc( void *ptr, std::size_t sz ) {
+CPPCODE(extern "C") void *ltrealloc( void *ptr, size_t sz ) {
 	if( !ptr ) return ltmalloc( sz );
 	if( !sz  ) return ltfree( ptr ), (void *)0;
-	std::size_t osz = ltmsize( ptr );
+	size_t osz = ltmsize( ptr );
 #ifdef LTALLOC_OVERFLOW_DETECTION
 	osz -= LTALLOC_CANARY_SIZE;
 #endif
