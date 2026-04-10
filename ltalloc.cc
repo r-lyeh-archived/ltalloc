@@ -213,7 +213,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #	include <intrin.h>
 #	define CAS_LOCK(lock) _InterlockedExchange((long*)lock, 1)
 #	define LTALLOC_SPINLOCK_RELEASE(lock) _InterlockedExchange((long*)lock, 0)
-#	define PAUSE _mm_pause()
+#   if defined(_M_ARM64) || defined(_M_ARM64EC)
+#		define PAUSE __yield()
+#   else    
+#		define PAUSE _mm_pause()
+#   endif
 #else
 #	error LTALLOC_SPINLOCK_* not implemented.
 #endif
